@@ -546,7 +546,8 @@ TEACHER_HTML = """
 
     <script>
         var ws;
-        var wsUrl = "ws://" + window.location.host + "/ws";
+        var wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        var wsUrl = wsProtocol + window.location.host + "/ws";
         
         function connectWS() {
             ws = new WebSocket(wsUrl);
@@ -882,7 +883,8 @@ STUDENT_HTML = """
 
     <script>
         var ws;
-        var wsUrl = "ws://" + window.location.host + "/ws";
+        var wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+        var wsUrl = wsProtocol + window.location.host + "/ws";
         
         function connectWS() {
             ws = new WebSocket(wsUrl);
