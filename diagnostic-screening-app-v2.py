@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
+from typing import Optional, List, Dict
 import socket
-import json
 
-app = FastAPI(title="특수교육 기초학습기능검사 스마트 2대 연동 시스템")
+app = FastAPI(title="국립특수교육원 기초학습기능검사 스마트 연동 시스템 (HTTP Polling)")
 
 # 시스템 상태 관리
 class AppState:
@@ -13,16 +14,15 @@ class AppState:
         self.student_name = ""
         self.student_grade = ""
         self.preset_mode = ""  # '1', '2', '3', '4', '5'
-        self.current_domain = ""  # 'phoneme', 'word', 'fluency', 'vocab', 'comprehension'
-        self.current_subtest = ""  # 하위검사명
-        self.current_question_idx = 0  # 0-based
+        self.current_domain = ""
+        self.current_subtest = ""
+        self.current_question_idx = 0
         self.scores = {}  # {domain_subtest: [1, 0, 1...]}
         self.stop_triggered = False
         self.consecutive_wrong = 0
-        self.is_active = False
         self.test_completed = False
-        self.supplementary_recommended = []  # 추천된 보완검사 리스트
-        self.supplementary_active = False  # 보완검사 진행여부
+        self.supplementary_recommended = []
+        self.supplementary_active = False
 
 state = AppState()
 
@@ -47,7 +47,7 @@ TEST_CONTENT = {
             },
             "ran_object": {
                 "name": "6-1. 빠른 이름대기 (사물)",
-                "stop_rule": 99,  # 시간 제한 검사
+                "stop_rule": 99,
                 "type": "ran",
                 "questions": [
                     {
@@ -173,7 +173,6 @@ TEST_CONTENT = {
     }
 }
 
-# 5대 생애주기 프리셋 설정
 PRESET_MAPPING = {
     "1": {
         "name": "유치원 입학 (조기 선별 모드)",
@@ -197,26 +196,6 @@ PRESET_MAPPING = {
     }
 }
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(json.dumps(message))
-            except Exception:
-                pass
-
-manager = ConnectionManager()
-
 def get_current_domain_and_subtest():
     if not state.preset_mode or state.preset_mode not in PRESET_MAPPING:
         return None, None
@@ -226,8 +205,7 @@ def get_current_domain_and_subtest():
         return None, None
     return domains[state.current_question_idx]
 
-# 실시간 동기화 상태 갱신 함수
-async def update_connected_clients():
+def build_payload():
     dom, sub = get_current_domain_and_subtest()
     current_q_data = None
     subtest_title = ""
@@ -239,7 +217,6 @@ async def update_connected_clients():
         subtest_data = TEST_CONTENT[dom]["subtests"][sub]
         subtest_title = subtest_data["name"]
         
-        # 현재 하위검사 문항 중 교사가 진행 중인 인덱스
         subtest_idx = 0
         if f"{dom}_{sub}" in state.scores:
             subtest_idx = len(state.scores[f"{dom}_{sub}"])
@@ -251,7 +228,7 @@ async def update_connected_clients():
         else:
             current_q_data = {"q": "하위검사 완료", "a": "", "guide": "다음 영역으로 넘어가세요."}
 
-    payload = {
+    return {
         "student_name": state.student_name,
         "student_grade": state.student_grade,
         "preset_name": PRESET_MAPPING.get(state.preset_mode, {}).get("name", ""),
@@ -267,9 +244,143 @@ async def update_connected_clients():
         "supplementary_recommended": state.supplementary_recommended,
         "supplementary_active": state.supplementary_active
     }
-    await manager.broadcast(payload)
 
-# 교사용 UI HTML
+async def advance_next_step():
+    state.consecutive_wrong = 0
+    state.current_question_idx += 1
+    dom, sub = get_current_domain_and_subtest()
+    if dom and sub:
+        state.scores[f"{dom}_{sub}"] = []
+    else:
+        state.test_completed = True
+        analyze_supplementary_recommendations()
+
+def analyze_supplementary_recommendations():
+    if state.student_grade == "초등학교 2학년":
+        for sub_key, scores in state.scores.items():
+            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
+            if correct_pct < 0.8:
+                state.supplementary_recommended.append("음운 처리 보완검사")
+                break
+    elif "초등학교 3학년" in state.student_grade or "초등학교 4학년" in state.student_grade:
+        for sub_key, scores in state.scores.items():
+            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
+            if correct_pct < 0.8:
+                state.supplementary_recommended.append("음운 처리 보완검사")
+                state.supplementary_recommended.append("글자·단어 인지 보완검사")
+                break
+
+# REST API Endpoints
+@app.get("/api/state")
+async def get_state():
+    return JSONResponse(content=build_payload())
+
+class StartRequest(BaseModel):
+    student_name: str
+    student_grade: str
+    preset_mode: str
+
+@app.post("/api/start")
+async def api_start(req: StartRequest):
+    state.student_name = req.student_name
+    state.student_grade = req.student_grade
+    state.preset_mode = req.preset_mode
+    state.current_question_idx = 0
+    state.scores = {}
+    state.stop_triggered = False
+    state.consecutive_wrong = 0
+    state.test_completed = False
+    state.supplementary_recommended = []
+    state.supplementary_active = False
+
+    dom, sub = get_current_domain_and_subtest()
+    if dom and sub:
+        state.scores[f"{dom}_{sub}"] = []
+    return JSONResponse(content=build_payload())
+
+class GradeRequest(BaseModel):
+    score: int
+
+@app.post("/api/grade")
+async def api_grade(req: GradeRequest):
+    score = req.score
+    dom, sub = get_current_domain_and_subtest()
+    if dom and sub:
+        sub_key = f"{dom}_{sub}"
+        if sub_key not in state.scores:
+            state.scores[sub_key] = []
+        state.scores[sub_key].append(score)
+
+        if score == 0:
+            state.consecutive_wrong += 1
+        else:
+            state.consecutive_wrong = 0
+
+        subtest_data = TEST_CONTENT[dom]["subtests"][sub]
+        stop_threshold = subtest_data.get("stop_rule", 3)
+
+        if state.consecutive_wrong >= stop_threshold:
+            state.stop_triggered = True
+            state.consecutive_wrong = 0
+        else:
+            current_len = len(state.scores[sub_key])
+            total_q_len = len(subtest_data["questions"])
+            if current_len >= total_q_len:
+                await advance_next_step()
+    return JSONResponse(content=build_payload())
+
+@app.post("/api/skip")
+async def api_skip():
+    await advance_next_step()
+    return JSONResponse(content=build_payload())
+
+@app.post("/api/resume")
+async def api_resume():
+    state.stop_triggered = False
+    await advance_next_step()
+    return JSONResponse(content=build_payload())
+
+@app.post("/api/supplementary")
+async def api_supplementary():
+    state.supplementary_active = True
+    state.test_completed = False
+    state.stop_triggered = False
+    state.current_question_idx = 0
+
+    supp_domains = []
+    for rec_name in state.supplementary_recommended:
+        if "음운" in rec_name:
+            supp_domains.append(("phoneme", "blending"))
+        if "글자" in rec_name:
+            supp_domains.append(("word", "letter"))
+            supp_domains.append(("word", "regular_word"))
+
+    PRESET_MAPPING["supplementary"] = {
+        "name": "보완 정밀 진단검사 모드",
+        "domains": supp_domains
+    }
+    state.preset_mode = "supplementary"
+    state.scores = {}
+    state.supplementary_recommended = []
+
+    dom, sub = get_current_domain_and_subtest()
+    if dom and sub:
+        state.scores[f"{dom}_{sub}"] = []
+    return JSONResponse(content=build_payload())
+
+@app.post("/api/reset")
+async def api_reset():
+    state.student_name = ""
+    state.student_grade = ""
+    state.preset_mode = ""
+    state.scores = {}
+    state.stop_triggered = False
+    state.consecutive_wrong = 0
+    state.test_completed = False
+    state.supplementary_recommended = []
+    state.supplementary_active = False
+    return JSONResponse(content=build_payload())
+
 TEACHER_HTML = """
 <!DOCTYPE html>
 <html>
@@ -279,143 +390,40 @@ TEACHER_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: 'Noto Sans KR', sans-serif;
-            background-color: #f0f2f5;
-            margin: 0;
-            padding: 0;
-            color: #333;
-        }
-        .header {
-            background-color: #1e3a8a;
-            color: white;
-            padding: 15px 20px;
-            font-size: 1.2rem;
-            font-weight: 700;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .container {
-            max-width: 900px;
-            margin: 20px auto;
-            padding: 10px;
-        }
-        .card {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            padding: 25px;
-            margin-bottom: 20px;
-        }
-        .form-group {
-            margin-bottom: 15px;
-        }
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        .form-group input, .form-group select {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 6px;
-            font-size: 1rem;
-            box-sizing: border-box;
-        }
-        button {
-            background-color: #2563eb;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        button:hover {
-            background-color: #1d4ed8;
-        }
-        .btn-correct {
-            background-color: #10b981;
-            font-size: 1.3rem;
-            padding: 15px 35px;
-        }
-        .btn-wrong {
-            background-color: #ef4444;
-            font-size: 1.3rem;
-            padding: 15px 35px;
-        }
-        .btn-stop {
-            background-color: #f59e0b;
-        }
-        .score-box {
-            display: inline-block;
-            width: 30px;
-            height: 30px;
-            line-height: 30px;
-            text-align: center;
-            border-radius: 50%;
-            margin-right: 5px;
-            color: white;
-            font-weight: 700;
-        }
+        body { font-family: 'Noto Sans KR', sans-serif; background-color: #f0f2f5; margin: 0; padding: 0; color: #333; }
+        .header { background-color: #1e3a8a; color: white; padding: 15px 20px; font-size: 1.2rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        .container { max-width: 900px; margin: 20px auto; padding: 10px; }
+        .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 25px; margin-bottom: 20px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
+        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
+        button { background-color: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+        button:hover { background-color: #1d4ed8; }
+        .btn-correct { background-color: #10b981; font-size: 1.3rem; padding: 15px 35px; }
+        .btn-wrong { background-color: #ef4444; font-size: 1.3rem; padding: 15px 35px; }
+        .btn-stop { background-color: #f59e0b; }
+        .score-box { display: inline-block; width: 30px; height: 30px; line-height: 30px; text-align: center; border-radius: 50%; margin-right: 5px; color: white; font-weight: 700; }
         .score-1 { background-color: #10b981; }
         .score-0 { background-color: #ef4444; }
-        .grid-buttons {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-top: 20px;
-        }
-        .report-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 15px;
-        }
-        .report-table th, .report-table td {
-            border: 1px solid #ddd;
-            padding: 12px;
-            text-align: left;
-        }
-        .report-table th {
-            background-color: #e2e8f0;
-        }
-        .badge {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.8rem;
-            font-weight: 700;
-            color: white;
-        }
+        .grid-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px; }
+        .report-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .report-table th, .report-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        .report-table th { background-color: #e2e8f0; }
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 700; color: white; }
         .badge-info { background-color: #3b82f6; }
         .badge-warning { background-color: #f59e0b; }
         .badge-danger { background-color: #ef4444; }
-        .bar-chart {
-            background-color: #e2e8f0;
-            border-radius: 4px;
-            height: 24px;
-            width: 100%;
-            margin-top: 5px;
-            overflow: hidden;
-        }
-        .bar-fill {
-            background-color: #3b82f6;
-            height: 100%;
-        }
+        .bar-chart { background-color: #e2e8f0; border-radius: 4px; height: 24px; width: 100%; margin-top: 5px; overflow: hidden; }
+        .bar-fill { background-color: #3b82f6; height: 100%; }
     </style>
 </head>
 <body>
     <div class="header">
         <div>🔍 국립특수교육원 기초학습기능검사 스마트 채점 시스템</div>
-        <div id="connection-status" style="color: #6ee7b7;">🟢 기기 연결됨</div>
+        <div id="connection-status" style="color: #6ee7b7;">🟢 기기 연동 완료 (HTTP 1초 자동 동기화)</div>
     </div>
     <div class="container">
         
-        <!-- 1. 아동 등록 카드 -->
         <div id="card-setup" class="card">
             <h2 style="margin-top:0;">📝 평가 아동 정보 등록</h2>
             <div class="form-group">
@@ -447,7 +455,6 @@ TEACHER_HTML = """
             <button onclick="startSession()">🚀 아동용 패널 연동 및 검사 시작</button>
         </div>
 
-        <!-- 2. 실시간 검사 통제 카드 -->
         <div id="card-exam" class="card" style="display:none;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <h3 id="exam-domain" style="margin:0; color:#1e3a8a;"></h3>
@@ -459,7 +466,6 @@ TEACHER_HTML = """
                 ⚠️ 경고: 연속 2회 오답! 1번 더 틀리면 자동 중지 규칙이 작동합니다.
             </div>
 
-            <!-- 현재 문제 제시 카드 -->
             <div style="background-color:#f8fafc; border-left:6px solid #2563eb; padding:20px; border-radius:4px; margin:15px 0;">
                 <div style="font-size:0.9rem; color:#64748b;">아동 화면 송출 중:</div>
                 <div id="exam-question" style="font-size:2.5rem; font-weight:700; margin:10px 0; color:#0f172a;"></div>
@@ -468,13 +474,11 @@ TEACHER_HTML = """
                 <div id="exam-answer" style="font-size:1.1rem; color:#10b981; font-weight:700; margin-top:5px;"></div>
             </div>
 
-            <!-- 현재 하위검사 실시간 득점 현황 -->
             <div id="subtest-score-flow" style="margin:15px 0;">
                 <span style="font-weight:500; color:#64748b; margin-right:10px;">현재 영역 채점 현황:</span>
                 <span id="score-flow-container"></span>
             </div>
 
-            <!-- 채점 및 통제 버튼 -->
             <div class="grid-buttons" id="exam-actions">
                 <button class="btn-correct" onclick="gradeItem(1)">🟢 맞음 (1점)</button>
                 <button class="btn-wrong" onclick="gradeItem(0)">❌ 틀림 (0점)</button>
@@ -485,7 +489,6 @@ TEACHER_HTML = """
             </div>
         </div>
 
-        <!-- 3. 검사 중지 안내 카드 -->
         <div id="card-stop" class="card" style="display:none; border-top:8px solid #ef4444; text-align:center;">
             <h1 style="color:#ef4444; margin-top:0;">🛑 자동 중지 규칙(Stop Rule) 작동</h1>
             <p style="font-size:1.2rem; line-height:1.6;">
@@ -496,7 +499,6 @@ TEACHER_HTML = """
             <button onclick="resumeNextSubtest()" style="background-color:#10b981; font-size:1.2rem; padding:15px 30px;">다음 하위검사로 계속 진행하기 ➡️</button>
         </div>
 
-        <!-- 4. 결과 및 IEP 보고서 카드 -->
         <div id="card-report" class="card" style="display:none; border-top:8px solid #10b981;">
             <h1 style="color:#10b981; margin-top:0; text-align:center;">📊 진단평가 결과 및 IEP 권고 리포트</h1>
             <div style="background-color:#f1f5f9; padding:15px; border-radius:8px; margin-bottom:20px;">
@@ -508,7 +510,6 @@ TEACHER_HTML = """
                 </div>
             </div>
 
-            <!-- 영역별 점수 통계 표 및 그래프 -->
             <h3>📈 소검사별 수행도 프로파일</h3>
             <table class="report-table">
                 <thead>
@@ -520,21 +521,17 @@ TEACHER_HTML = """
                     </tr>
                 </thead>
                 <tbody id="report-table-body">
-                    <!-- 동적 생성됨 -->
                 </tbody>
             </table>
 
-            <!-- 보완검사 자동 분기 결과 안내 -->
             <div id="supplementary-section" class="card" style="display:none; background-color:#fffbeb; border:1px solid #fef3c7; margin-top:20px;">
                 <h3 style="margin-top:0; color:#d97706;">⚠️ 보완 진단검사 실시 추천</h3>
                 <p id="supplementary-message" style="line-height:1.5;"></p>
                 <button onclick="startSupplementaryTest()" style="background-color:#d97706;">보완 검사 연동 실시하기</button>
             </div>
 
-            <!-- 개별화 교육 중재(IEP) 전략 제안 -->
             <h3>💡 특수교육 중재 계획(IEP) 가이드라인</h3>
             <div id="iep-guideline-box" style="background-color:#eff6ff; border-left:6px solid #3b82f6; padding:15px; border-radius:4px; line-height:1.6;">
-                <!-- 동적 추천 알고리즘에 의해 맞춤형 한글 IEP 제안 출력됨 -->
             </div>
             
             <div style="margin-top:25px; text-align:center;">
@@ -545,71 +542,73 @@ TEACHER_HTML = """
     </div>
 
     <script>
-        var ws;
-        var wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        var wsUrl = wsProtocol + window.location.host + "/ws";
-        
-        function connectWS() {
-            ws = new WebSocket(wsUrl);
-            ws.onopen = function() {
-                document.getElementById("connection-status").innerHTML = "🟢 아동용 패널 및 서버 연동 활성화";
-                document.getElementById("connection-status").style.color = "#6ee7b7";
-            };
-            ws.onclose = function() {
-                document.getElementById("connection-status").innerHTML = "🔴 연동 끊김 (재접속 중...)";
-                document.getElementById("connection-status").style.color = "#f87171";
-                setTimeout(connectWS, 1000);
-            };
-            ws.onmessage = function(event) {
-                var state = JSON.parse(event.data);
+        async function fetchState() {
+            try {
+                let res = await fetch('/api/state');
+                let state = await res.json();
                 renderState(state);
-            };
+                document.getElementById("connection-status").innerHTML = "🟢 아동용 패널 및 서버 연동 활성화 (HTTP 1초 자동 동기화)";
+                document.getElementById("connection-status").style.color = "#6ee7b7";
+            } catch(e) {
+                document.getElementById("connection-status").innerHTML = "🟡 동기화 대기 중...";
+                document.getElementById("connection-status").style.color = "#f59e0b";
+            }
         }
 
-        connectWS();
+        // 1초마다 자동 동기화 Polling
+        setInterval(fetchState, 1000);
+        fetchState();
 
-        function startSession() {
+        async function startSession() {
             var name = document.getElementById("input-name").value;
             var grade = document.getElementById("select-grade").value;
             var preset = document.getElementById("select-preset").value;
             
-            ws.send(JSON.stringify({
-                "action": "start",
-                "student_name": name,
-                "student_grade": grade,
-                "preset_mode": preset
-            }));
+            let res = await fetch('/api/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    student_name: name,
+                    student_grade: grade,
+                    preset_mode: preset
+                })
+            });
+            let state = await res.json();
+            renderState(state);
         }
 
-        function gradeItem(isCorrect) {
-            ws.send(JSON.stringify({
-                "action": "grade",
-                "score": isCorrect
-            }));
+        async function gradeItem(isCorrect) {
+            let res = await fetch('/api/grade', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ score: isCorrect })
+            });
+            let state = await res.json();
+            renderState(state);
         }
 
-        function skipToNextSubtest() {
-            ws.send(JSON.stringify({
-                "action": "skip"
-            }));
+        async function skipToNextSubtest() {
+            let res = await fetch('/api/skip', { method: 'POST' });
+            let state = await res.json();
+            renderState(state);
         }
 
-        function resumeNextSubtest() {
-            ws.send(JSON.stringify({
-                "action": "resume_after_stop"
-            }));
+        async function resumeNextSubtest() {
+            let res = await fetch('/api/resume', { method: 'POST' });
+            let state = await res.json();
+            renderState(state);
         }
 
-        function startSupplementaryTest() {
-            ws.send(JSON.stringify({
-                "action": "start_supplementary"
-            }));
+        async function startSupplementaryTest() {
+            let res = await fetch('/api/supplementary', { method: 'POST' });
+            let state = await res.json();
+            renderState(state);
         }
 
-        function resetTest() {
-            ws.send(JSON.stringify({
-                "action": "reset"
-            }));
+        async function resetTest() {
+            let res = await fetch('/api/reset', { method: 'POST' });
+            let state = await res.json();
+            renderState(state);
         }
 
         function renderState(state) {
@@ -623,7 +622,6 @@ TEACHER_HTML = """
 
             document.getElementById("card-setup").style.display = "none";
 
-            // 중지규칙 팝업 처리
             if (state.stop_triggered) {
                 document.getElementById("card-exam").style.display = "none";
                 document.getElementById("card-stop").style.display = "block";
@@ -633,7 +631,6 @@ TEACHER_HTML = """
                 document.getElementById("card-stop").style.display = "none";
             }
 
-            // 보고서 출력 처리
             if (state.test_completed) {
                 document.getElementById("card-exam").style.display = "none";
                 document.getElementById("card-report").style.display = "block";
@@ -648,7 +645,6 @@ TEACHER_HTML = """
                 document.getElementById("card-report").style.display = "none";
             }
 
-            // 실시간 평가 진행 화면 출력
             document.getElementById("card-exam").style.display = "block";
             document.getElementById("exam-domain").innerText = state.domain_title;
             document.getElementById("exam-preset-name").innerText = state.preset_name + (state.supplementary_active ? " (보완 검사)" : "");
@@ -657,11 +653,9 @@ TEACHER_HTML = """
             document.getElementById("exam-guide").innerText = "💡 지시문: " + state.current_guide;
             document.getElementById("exam-answer").innerText = "🔑 예시 정답: " + state.current_answer;
 
-            // 실시간 득점 시각화 (O, X 흐름 동그라미)
             var scoreFlowContainer = document.getElementById("score-flow-container");
             scoreFlowContainer.innerHTML = "";
             
-            // 현재 어떤 검사인지 식별키 찾기
             var current_sub_key = "";
             for (var key in TEST_CONTENT) {
                 for (var s_key in TEST_CONTENT[key]["subtests"]) {
@@ -688,7 +682,6 @@ TEACHER_HTML = """
                 });
             }
 
-            // 연속 오답 경고 박스
             if (consecutiveWrongCount >= 2) {
                 document.getElementById("consecutive-warning-box").style.display = "block";
             } else {
@@ -704,14 +697,12 @@ TEACHER_HTML = """
             var totalCorrect = 0;
             var lowScoreDetected = false;
 
-            // 전체 원점수 분석
             for (var subKey in state.scores) {
                 var scoresList = state.scores[subKey];
                 var subCorrect = scoresList.reduce((a, b) => a + b, 0);
                 var subTotal = scoresList.length;
 
-                // 총 문항 개수 동적 연동
-                var maxQuestions = 8; // 기본값
+                var maxQuestions = 8;
                 var displayName = subKey;
                 for (var dom in TEST_CONTENT) {
                     for (var sub in TEST_CONTENT[dom]["subtests"]) {
@@ -724,7 +715,6 @@ TEACHER_HTML = """
 
                 var pct = subTotal > 0 ? Math.round((subCorrect / subTotal) * 100) : 0;
                 
-                // 수준 판정 로직
                 var level = "정상 범주";
                 var levelClass = "badge-info";
                 if (pct < 50) {
@@ -757,7 +747,6 @@ TEACHER_HTML = """
                 totalPossible += subTotal;
             }
 
-            // 보완검사 추천 시스템 연동 (초3 발달지체 재심의 조건)
             var suppSection = document.getElementById("supplementary-section");
             if (state.supplementary_recommended.length > 0 && !state.supplementary_active) {
                 suppSection.style.display = "block";
@@ -770,7 +759,6 @@ TEACHER_HTML = """
                 suppSection.style.display = "none";
             }
 
-            // 개별화 교육계획(IEP) 동적 조치 가이드라인 생성
             var iepBox = document.getElementById("iep-guideline-box");
             if (lowScoreDetected) {
                 iepBox.innerHTML = `
@@ -796,7 +784,6 @@ TEACHER_HTML = """
 </html>
 """
 
-# 아동용 UI HTML (giant 글자/이모지 중심)
 STUDENT_HTML = """
 <!DOCTYPE html>
 <html>
@@ -806,75 +793,25 @@ STUDENT_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@700&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: 'Noto Sans KR', sans-serif;
-            background-color: #ffffff;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            overflow: hidden;
-            user-select: none;
-            -webkit-user-select: none;
-        }
-        .canvas-container {
-            text-align: center;
-            width: 90%;
-            max-width: 1000px;
-        }
-        /* 아동에게 매우 크게 보여주는 글자 스타일 */
-        .giant-text {
-            font-size: 6.5rem;
-            font-weight: 700;
-            color: #0f172a;
-            line-height: 1.3;
-            word-break: keep-all;
-            transition: all 0.2s ease-in-out;
-        }
-        .giant-emoji {
-            font-size: 10rem;
-            margin-bottom: 20px;
-        }
-        .story-text {
-            font-size: 2.2rem;
-            line-height: 1.6;
-            text-align: left;
-            background-color: #f8fafc;
-            padding: 30px;
-            border-radius: 12px;
-            border: 2px solid #e2e8f0;
-            max-height: 70vh;
-            overflow-y: auto;
-        }
-        .waiting-screen {
-            color: #64748b;
-        }
-        .waiting-text {
-            font-size: 2.5rem;
-            margin-top: 20px;
-        }
-        .pulse {
-            animation: pulse-animation 2s infinite;
-        }
-        @keyframes pulse-animation {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
-        }
+        body { font-family: 'Noto Sans KR', sans-serif; background-color: #ffffff; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; user-select: none; -webkit-user-select: none; }
+        .canvas-container { text-align: center; width: 90%; max-width: 1000px; }
+        .giant-text { font-size: 6.5rem; font-weight: 700; color: #0f172a; line-height: 1.3; word-break: keep-all; transition: all 0.2s ease-in-out; }
+        .giant-emoji { font-size: 10rem; margin-bottom: 20px; }
+        .story-text { font-size: 2.2rem; line-height: 1.6; text-align: left; background-color: #f8fafc; padding: 30px; border-radius: 12px; border: 2px solid #e2e8f0; max-height: 70vh; overflow-y: auto; }
+        .waiting-screen { color: #64748b; }
+        .waiting-text { font-size: 2.5rem; margin-top: 20px; }
+        .pulse { animation: pulse-animation 2s infinite; }
+        @keyframes pulse-animation { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
     </style>
 </head>
 <body>
     <div class="canvas-container">
         
-        <!-- 대기 화면 또는 자동중지 완료시 화면 -->
         <div id="student-waiting" class="waiting-screen">
             <div class="giant-emoji pulse">📖</div>
             <div class="waiting-text" id="waiting-message">반갑습니다!<br>선생님과 함께 재미있는 공부를 시작해봐요.</div>
         </div>
 
-        <!-- 글자 또는 삽화 자극 화면 -->
         <div id="student-exam" style="display:none;">
             <div id="question-area" class="giant-text"></div>
         </div>
@@ -882,22 +819,17 @@ STUDENT_HTML = """
     </div>
 
     <script>
-        var ws;
-        var wsProtocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-        var wsUrl = wsProtocol + window.location.host + "/ws";
-        
-        function connectWS() {
-            ws = new WebSocket(wsUrl);
-            ws.onmessage = function(event) {
-                var state = JSON.parse(event.data);
+        async function fetchStudentState() {
+            try {
+                let res = await fetch('/api/state');
+                let state = await res.json();
                 renderStudentState(state);
-            };
-            ws.onclose = function() {
-                setTimeout(connectWS, 1000);
-            };
+            } catch(e) {}
         }
 
-        connectWS();
+        // 1초마다 자동 동기화 Polling
+        setInterval(fetchStudentState, 1000);
+        fetchStudentState();
 
         function renderStudentState(state) {
             var waitingDiv = document.getElementById("student-waiting");
@@ -905,7 +837,6 @@ STUDENT_HTML = """
             var qArea = document.getElementById("question-area");
             var waitingMsg = document.getElementById("waiting-message");
 
-            // 1. 아동 미등록 및 대기 상태
             if (!state.student_name) {
                 waitingDiv.style.display = "block";
                 examDiv.style.display = "none";
@@ -913,7 +844,6 @@ STUDENT_HTML = """
                 return;
             }
 
-            // 2. 자동 중지 룰 작동 시 아동 좌절 방지 편안한 화면
             if (state.stop_triggered) {
                 waitingDiv.style.display = "block";
                 examDiv.style.display = "none";
@@ -921,7 +851,6 @@ STUDENT_HTML = """
                 return;
             }
 
-            // 3. 검사 전체 종료 상태
             if (state.test_completed) {
                 waitingDiv.style.display = "block";
                 examDiv.style.display = "none";
@@ -929,20 +858,15 @@ STUDENT_HTML = """
                 return;
             }
 
-            // 4. 활발히 검사 진행 중인 상태
             waitingDiv.style.display = "none";
             examDiv.style.display = "block";
 
-            // 현재 노출할 텍스트 및 레이아웃 정리
             var questionText = state.current_question;
             
-            // 유창성 긴 줄글 지문인지 확인하여 레이아웃 조정
             if (state.is_ran_or_flow) {
                 if (questionText.length > 30) {
-                    // 유창성 긴 지문
                     qArea.className = "story-text";
                 } else {
-                    // RAN(빠른 자동 이름대기) - 기기별 이모지 정렬용
                     qArea.className = "giant-text";
                     qArea.style.fontSize = "5.5rem";
                 }
@@ -951,7 +875,6 @@ STUDENT_HTML = """
                 qArea.style.fontSize = "7.5rem";
             }
 
-            // 텍스트 송출
             qArea.innerText = questionText;
         }
     </script>
@@ -959,7 +882,6 @@ STUDENT_HTML = """
 </html>
 """
 
-# HTML 라우팅 엔드포인트
 @app.get("/teacher", response_class=HTMLResponse)
 async def get_teacher():
     return HTMLResponse(content=TEACHER_HTML)
@@ -982,179 +904,5 @@ async def redirect_root():
     </div>
     """)
 
-# 실시간 웹소켓 제어 엔드포인트
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    # 신규 기기 접속 시 현재 전체 상태 전송
-    await update_connected_clients()
-    try:
-        while True:
-            data = await websocket.receive_text()
-            event = json.loads(data)
-            action = event.get("action")
-
-            if action == "start":
-                state.student_name = event.get("student_name")
-                state.student_grade = event.get("student_grade")
-                state.preset_mode = event.get("preset_mode")
-                state.current_question_idx = 0
-                state.scores = {}
-                state.stop_triggered = False
-                state.consecutive_wrong = 0
-                state.test_completed = False
-                state.supplementary_recommended = []
-                state.supplementary_active = False
-
-                # 첫 번째 하위검사 초기화
-                dom, sub = get_current_domain_and_subtest()
-                if dom and sub:
-                    state.scores[f"{dom}_{sub}"] = []
-                
-            elif action == "grade":
-                score = event.get("score")
-                dom, sub = get_current_domain_and_subtest()
-                
-                if dom and sub:
-                    sub_key = f"{dom}_{sub}"
-                    if sub_key not in state.scores:
-                        state.scores[sub_key] = []
-                    
-                    state.scores[sub_key].append(score)
-                    
-                    # 중지 규칙 체크 (Stop Rule)
-                    if score == 0:
-                        state.consecutive_wrong += 1
-                    else:
-                        state.consecutive_wrong = 0
-                        
-                    subtest_data = TEST_CONTENT[dom]["subtests"][sub]
-                    stop_threshold = subtest_data.get("stop_rule", 3)
-                    
-                    # 3개 연속 오답 시 자동 중지
-                    if state.consecutive_wrong >= stop_threshold:
-                        state.stop_triggered = True
-                        state.consecutive_wrong = 0
-                    else:
-                        # 현재 하위검사가 모두 끝났는지 체크
-                        current_len = len(state.scores[sub_key])
-                        total_q_len = len(subtest_data["questions"])
-                        if current_len >= total_q_len:
-                            # 다음 하위검사로 넘기기
-                            await advance_next_step()
-                            
-            elif action == "skip":
-                # 현재 영역 강제 건너뛰기
-                await advance_next_step()
-                
-            elif action == "resume_after_stop":
-                # 자동중지 팝업 복귀 후 다음 하위검사 진행
-                state.stop_triggered = False
-                await advance_next_step()
-
-            elif action == "start_supplementary":
-                # 추천된 보완검사를 검사 대기열로 즉시 로드
-                state.supplementary_active = True
-                state.test_completed = False
-                state.stop_triggered = False
-                state.current_question_idx = 0
-                
-                # 가상의 보완검사 프리셋 동적 매핑 주입
-                supp_domains = []
-                for rec_name in state.supplementary_recommended:
-                    if "음운" in rec_name:
-                        supp_domains.append(("phoneme", "blending"))
-                    if "글자" in rec_name:
-                        supp_domains.append(("word", "letter"))
-                        supp_domains.append(("word", "regular_word"))
-                
-                # 보완검사 프리셋 오버라이딩 등록
-                PRESET_MAPPING["supplementary"] = {
-                    "name": "보완 정밀 진단검사 모드",
-                    "domains": supp_domains
-                }
-                state.preset_mode = "supplementary"
-                state.scores = {}
-                state.supplementary_recommended = []
-                
-                dom, sub = get_current_domain_and_subtest()
-                if dom and sub:
-                    state.scores[f"{dom}_{sub}"] = []
-
-            elif action == "reset":
-                # 아동 등록 화면으로 완전 초기화
-                state.student_name = ""
-                state.student_grade = ""
-                state.preset_mode = ""
-                state.scores = {}
-                state.stop_triggered = False
-                state.consecutive_wrong = 0
-                state.test_completed = False
-                state.supplementary_recommended = []
-                state.supplementary_active = False
-
-            await update_connected_clients()
-            
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
-async def advance_next_step():
-    state.consecutive_wrong = 0
-    state.current_question_idx += 1
-    dom, sub = get_current_domain_and_subtest()
-    if dom and sub:
-        state.scores[f"{dom}_{sub}"] = []
-    else:
-        # 모든 검사 과정 완료됨 ➡️ 결과 리포트 분석
-        state.test_completed = True
-        analyze_supplementary_recommendations()
-
-# 특수교육 진단평가 요강에 기반한 지능형 보완검사 추천 시스템
-def analyze_supplementary_recommendations():
-    # 1. 초등학교 2학년 아동 중 학년수준 기준 1학년 이하(정답률 80% 미만) 검출 시 ➡️ '음운 처리' 추가 추천
-    if state.student_grade == "초등학교 2학년":
-        for sub_key, scores in state.scores.items():
-            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-            if correct_pct < 0.8:
-                state.supplementary_recommended.append("음운 처리 보완검사")
-                break
-                
-    # 2. 초등학교 3학년 아동 중 학년수준 기준 2학년 이하(정답률 80% 미만) 검출 시 ➡️ '음운 처리' & '글자·단어 인지' 추가 추천
-    elif "초등학교 3학년" in state.student_grade or "초등학교 4학년" in state.student_grade:
-        for sub_key, scores in state.scores.items():
-            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-            if correct_pct < 0.8:
-                state.supplementary_recommended.append("음운 처리 보완검사")
-                state.supplementary_recommended.append("글자·단어 인지 보완검사")
-                break
-
-# 로컬 무선 공유기(Wi-Fi) IP 주소 자동 획득 함수 (초보자 기기 연결 편의 기능)
-def get_local_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # 실제 연결을 맺지 않고도 로컬 라우터 IP를 획득하는 스마트 팁
-        s.connect(('10.255.255.255', 1))
-        IP = s.getsockname()[0]
-    except Exception:
-        IP = '127.0.0.1'
-    finally:
-        s.close()
-    return IP
-
 if __name__ == "__main__":
-    local_ip = get_local_ip()
-    port = 8000
-    
-    print("=" * 70)
-    print("📡 [스마트 특수교육 진단평가 2대 연동 웹앱] 정상적으로 구동되었습니다!")
-    print("-" * 70)
-    print(f"👉 1. 교사용 태블릿 PC 접속 주소 (이메일 채점/제어용):")
-    print(f"   URL: http://{local_ip}:{port}/teacher")
-    print()
-    print(f"👉 2. 아동용 태블릿 PC 접속 주소 (학생 그림/글자 제시용):")
-    print(f"   URL: http://{local_ip}:{port}/student")
-    print("-" * 70)
-    print("※ 두 태블릿 PC 모두 동일한 Wi-Fi(공유기)에 연결되어 있어야 연동이 가능합니다.")
-    print("=" * 70)
-    
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
