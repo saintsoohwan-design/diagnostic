@@ -5,26 +5,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import socket
+import random
+import time
 
-app = FastAPI(title="국립특수교육원 기초학습기능검사 스마트 연동 시스템 (HTTP Polling)")
-
-# 시스템 상태 관리
-class AppState:
-    def __init__(self):
-        self.student_name = ""
-        self.student_grade = ""
-        self.preset_mode = ""  # '1', '2', '3', '4', '5'
-        self.current_domain = ""
-        self.current_subtest = ""
-        self.current_question_idx = 0
-        self.scores = {}  # {domain_subtest: [1, 0, 1...]}
-        self.stop_triggered = False
-        self.consecutive_wrong = 0
-        self.test_completed = False
-        self.supplementary_recommended = []
-        self.supplementary_active = False
-
-state = AppState()
+app = FastAPI(title="국립특수교육원 기초학습기능검사 다중방 스마트 연동 시스템 (Multi-Room HTTP Polling)")
 
 # 검사 데이터 정의
 TEST_CONTENT = {
@@ -142,7 +126,7 @@ TEST_CONTENT = {
                 "name": "1. 단어가 뜻하는 그림 찾기",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "놀이터 🛝", "a": "1번 그림", "guide": "제시된 어휘 '놀이터'에 알맞은 그림(보기 1번: 미끄럼틀이 있는 놀이터)을 고르게 하세요."},
+                    {"q": "놀이터 🛝", "a": "1번 그림", "guide": "제시된 어휘 '놀이터'에 알맞은 그림(보기 1번)을 고르게 하세요."},
                     {"q": "소방관 🧑‍🚒", "a": "4번 그림", "guide": "어휘 '소방관'에 알맞은 소방관 그림(보기 4번)을 아동이 터치하게 하세요."}
                 ]
             },
@@ -154,6 +138,22 @@ TEST_CONTENT = {
                     {"q": "위", "a": "아래 / 밑", "guide": "'위'의 반대말은 무엇일까요?"},
                     {"q": "쉽다", "a": "어렵다 / 난해하다", "guide": "'쉽다'의 반대말은 무엇일까요?"},
                     {"q": "조용하다", "a": "시끄럽다 / 소란스럽다", "guide": "'조용하다'의 반대말은 무엇일까요?"}
+                ]
+            },
+            "analogy": {
+                "name": "3. 어휘 유추",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "손 : 장갑 = 발 : ( ? )", "a": "양말 / 신발", "guide": "손에 장갑을 끼듯이 발에는 무엇을 신을까요?"},
+                    {"q": "낮 : 태양 = 밤 : ( ? )", "a": "달 / 별", "guide": "낮에는 태양이 뜨고 밤에는 무엇이 떠오를까요?"}
+                ]
+            },
+            "blank_fill": {
+                "name": "4. 빈칸 채우기",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "비가 오면 ( ? )을 씁니다.", "a": "우산", "guide": "문맥에 맞는 단어를 말해보세요."},
+                    {"q": "배가 고파서 ( ? )을 먹었습니다.", "a": "밥 / 음식 / 빵", "guide": "문맥에 맞는 단어를 말해보세요."}
                 ]
             }
         }
@@ -173,230 +173,304 @@ TEST_CONTENT = {
     }
 }
 
+# 4대 대상군별 프리셋 매핑
 PRESET_MAPPING = {
     "1": {
-        "name": "유치원 입학 (조기 선별 모드)",
-        "domains": [("phoneme", "blending"), ("word", "letter"), ("vocab", "matching_pic"), ("comprehension", "sentence_under")]
+        "name": "초1 (기초 해독 & 문해력 스크리닝)",
+        "desc": "초1 기초 음운, 글자·단어 인지, 글씨쓰기 및 기초 철자 진단 모드",
+        "domains": [("phoneme", "blending"), ("word", "letter"), ("word", "regular_word"), ("vocab", "matching_pic"), ("comprehension", "sentence_under")]
     },
     "2": {
-        "name": "초등학교 입학 (초1 기초 문해력 진단)",
-        "domains": [("word", "letter"), ("word", "regular_word"), ("vocab", "matching_pic"), ("comprehension", "sentence_under")]
+        "name": "초3 발달지체 재심의 (결손 보완 분기 모드)",
+        "desc": "초3 재심의용 유창성, 어휘, 독해, 쓰기 평가 및 80% 미만 시 음운/해독 하향 보완 분기",
+        "domains": [("fluency", "dog_story"), ("vocab", "antonym"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
     },
     "3": {
-        "name": "초등학교 3학년 발달지체 재심의 (장애 재분류 모드)",
-        "domains": [("fluency", "dog_story"), ("vocab", "antonym"), ("comprehension", "sentence_under")]
+        "name": "중입 (초6~중1 교과 문해력 진단)",
+        "desc": "중학교 입학 대비 어휘, 긴 글 독해, 문법 지식, 쓰기 유창성 평가 모드",
+        "domains": [("vocab", "antonym"), ("vocab", "analogy"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
     },
     "4": {
-        "name": "중학교 입학 (중1 교과 학습 대비 진단)",
-        "domains": [("vocab", "antonym"), ("comprehension", "sentence_under")]
-    },
-    "5": {
-        "name": "고등학교 입학 (전환기 기능적 평가 모드)",
-        "domains": [("vocab", "antonym"), ("comprehension", "sentence_under")]
+        "name": "고입 (~중3 전환기 기능적 평가 모드)",
+        "desc": "고등학교 진학 대비 기능적 어휘, 고난도 추론 독해, 논리적 문장 구성력 평가 모드",
+        "domains": [("vocab", "analogy"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
     }
 }
 
-def get_current_domain_and_subtest():
-    if not state.preset_mode or state.preset_mode not in PRESET_MAPPING:
-        return None, None
-    preset = PRESET_MAPPING[state.preset_mode]
-    domains = preset["domains"]
-    if state.current_question_idx >= len(domains):
-        return None, None
-    return domains[state.current_question_idx]
+# 다중 검사방(Room) 클래스
+class RoomState:
+    def __init__(self, room_id: str):
+        self.room_id = room_id
+        self.created_at = time.time()
+        self.last_active = time.time()
+        self.student_name = ""
+        self.student_grade = ""
+        self.preset_mode = ""
+        self.current_question_idx = 0
+        self.scores = {}
+        self.stop_triggered = False
+        self.consecutive_wrong = 0
+        self.test_completed = False
+        self.supplementary_recommended = []
+        self.supplementary_active = False
 
-def build_payload():
-    dom, sub = get_current_domain_and_subtest()
-    current_q_data = None
-    subtest_title = ""
-    domain_title = ""
-    is_ran_or_flow = False
-    
-    if dom and sub:
-        domain_title = TEST_CONTENT[dom]["title"]
-        subtest_data = TEST_CONTENT[dom]["subtests"][sub]
-        subtest_title = subtest_data["name"]
+    def touch(self):
+        self.last_active = time.time()
+
+    def get_current_domain_and_subtest(self):
+        if not self.preset_mode or self.preset_mode not in PRESET_MAPPING:
+            return None, None
+        preset = PRESET_MAPPING[self.preset_mode]
+        domains = preset["domains"]
+        if self.current_question_idx >= len(domains):
+            return None, None
+        return domains[self.current_question_idx]
+
+    def build_payload(self):
+        self.touch()
+        dom, sub = self.get_current_domain_and_subtest()
+        current_q_data = None
+        subtest_title = ""
+        domain_title = ""
+        is_ran_or_flow = False
         
-        subtest_idx = 0
-        if f"{dom}_{sub}" in state.scores:
-            subtest_idx = len(state.scores[f"{dom}_{sub}"])
+        if dom and sub:
+            domain_title = TEST_CONTENT[dom]["title"]
+            subtest_data = TEST_CONTENT[dom]["subtests"][sub]
+            subtest_title = subtest_data["name"]
             
-        if subtest_idx < len(subtest_data["questions"]):
-            current_q_data = subtest_data["questions"][subtest_idx]
-            if "type" in subtest_data and subtest_data["type"] in ["ran", "text_flow"]:
-                is_ran_or_flow = True
+            subtest_idx = 0
+            if f"{dom}_{sub}" in self.scores:
+                subtest_idx = len(self.scores[f"{dom}_{sub}"])
+                
+            if subtest_idx < len(subtest_data["questions"]):
+                current_q_data = subtest_data["questions"][subtest_idx]
+                if "type" in subtest_data and subtest_data["type"] in ["ran", "text_flow"]:
+                    is_ran_or_flow = True
+            else:
+                current_q_data = {"q": "하위검사 완료", "a": "", "guide": "다음 영역으로 넘어가세요."}
+
+        return {
+            "room_id": self.room_id,
+            "student_name": self.student_name,
+            "student_grade": self.student_grade,
+            "preset_name": PRESET_MAPPING.get(self.preset_mode, {}).get("name", ""),
+            "domain_title": domain_title,
+            "subtest_title": subtest_title,
+            "current_question": current_q_data["q"] if current_q_data else "",
+            "current_answer": current_q_data["a"] if current_q_data else "",
+            "current_guide": current_q_data["guide"] if current_q_data else "",
+            "stop_triggered": self.stop_triggered,
+            "test_completed": self.test_completed,
+            "is_ran_or_flow": is_ran_or_flow,
+            "scores": self.scores,
+            "supplementary_recommended": self.supplementary_recommended,
+            "supplementary_active": self.supplementary_active
+        }
+
+    def advance_next_step(self):
+        self.consecutive_wrong = 0
+        self.current_question_idx += 1
+        dom, sub = self.get_current_domain_and_subtest()
+        if dom and sub:
+            self.scores[f"{dom}_{sub}"] = []
         else:
-            current_q_data = {"q": "하위검사 완료", "a": "", "guide": "다음 영역으로 넘어가세요."}
+            self.test_completed = True
+            self.analyze_supplementary_recommendations()
 
-    return {
-        "student_name": state.student_name,
-        "student_grade": state.student_grade,
-        "preset_name": PRESET_MAPPING.get(state.preset_mode, {}).get("name", ""),
-        "domain_title": domain_title,
-        "subtest_title": subtest_title,
-        "current_question": current_q_data["q"] if current_q_data else "",
-        "current_answer": current_q_data["a"] if current_q_data else "",
-        "current_guide": current_q_data["guide"] if current_q_data else "",
-        "stop_triggered": state.stop_triggered,
-        "test_completed": state.test_completed,
-        "is_ran_or_flow": is_ran_or_flow,
-        "scores": state.scores,
-        "supplementary_recommended": state.supplementary_recommended,
-        "supplementary_active": state.supplementary_active
-    }
+    def analyze_supplementary_recommendations(self):
+        if self.student_grade == "초등학교 2학년":
+            for sub_key, scores in self.scores.items():
+                correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
+                if correct_pct < 0.8:
+                    self.supplementary_recommended.append("음운 처리 보완검사")
+                    break
+        elif "초등학교 3학년" in self.student_grade or "초등학교 4학년" in self.student_grade:
+            for sub_key, scores in self.scores.items():
+                correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
+                if correct_pct < 0.8:
+                    self.supplementary_recommended.append("음운 처리 보완검사")
+                    self.supplementary_recommended.append("글자·단어 인지 보완검사")
+                    break
 
-async def advance_next_step():
-    state.consecutive_wrong = 0
-    state.current_question_idx += 1
-    dom, sub = get_current_domain_and_subtest()
-    if dom and sub:
-        state.scores[f"{dom}_{sub}"] = []
-    else:
-        state.test_completed = True
-        analyze_supplementary_recommendations()
+# 글로벌 다중 검사방 저장소
+ROOMS: Dict[str, RoomState] = {}
 
-def analyze_supplementary_recommendations():
-    if state.student_grade == "초등학교 2학년":
-        for sub_key, scores in state.scores.items():
-            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-            if correct_pct < 0.8:
-                state.supplementary_recommended.append("음운 처리 보완검사")
-                break
-    elif "초등학교 3학년" in state.student_grade or "초등학교 4학년" in state.student_grade:
-        for sub_key, scores in state.scores.items():
-            correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-            if correct_pct < 0.8:
-                state.supplementary_recommended.append("음운 처리 보완검사")
-                state.supplementary_recommended.append("글자·단어 인지 보완검사")
-                break
+def get_or_create_room(room_id: Optional[str] = None) -> RoomState:
+    if room_id and room_id in ROOMS:
+        return ROOMS[room_id]
+    
+    # 4자리 랜덤 PIN 생성 (기존 PIN 중복 방지)
+    for _ in range(100):
+        new_pin = str(random.randint(1000, 9999))
+        if new_pin not in ROOMS:
+            ROOMS[new_pin] = RoomState(new_pin)
+            return ROOMS[new_pin]
+            
+    # fallback
+    fallback_pin = str(time.time_ns())[-4:]
+    ROOMS[fallback_pin] = RoomState(fallback_pin)
+    return ROOMS[fallback_pin]
 
-# REST API Endpoints
-@app.get("/api/state")
-async def get_state():
-    return JSONResponse(content=build_payload())
+# REST API Models & Endpoints
+class CreateRoomResponse(BaseModel):
+    room_id: str
 
 class StartRequest(BaseModel):
+    room_id: str
     student_name: str
     student_grade: str
     preset_mode: str
 
-@app.post("/api/start")
-async def api_start(req: StartRequest):
-    state.student_name = req.student_name
-    state.student_grade = req.student_grade
-    state.preset_mode = req.preset_mode
-    state.current_question_idx = 0
-    state.scores = {}
-    state.stop_triggered = False
-    state.consecutive_wrong = 0
-    state.test_completed = False
-    state.supplementary_recommended = []
-    state.supplementary_active = False
-
-    dom, sub = get_current_domain_and_subtest()
-    if dom and sub:
-        state.scores[f"{dom}_{sub}"] = []
-    return JSONResponse(content=build_payload())
-
 class GradeRequest(BaseModel):
+    room_id: str
     score: int
 
+class ActionRequest(BaseModel):
+    room_id: str
+
+@app.post("/api/create_room")
+def api_create_room():
+    room = get_or_create_room()
+    return {"room_id": room.room_id}
+
+@app.get("/api/state")
+def get_state(room: str):
+    if not room or room not in ROOMS:
+        return JSONResponse(status_code=404, content={"error": "invalid_room", "message": "존재하지 않거나 만료된 방 번호입니다."})
+    room_obj = ROOMS[room]
+    return JSONResponse(content=room_obj.build_payload())
+
+@app.post("/api/start")
+def api_start(req: StartRequest):
+    room_obj = get_or_create_room(req.room_id)
+    room_obj.student_name = req.student_name
+    room_obj.student_grade = req.student_grade
+    room_obj.preset_mode = req.preset_mode
+    room_obj.current_question_idx = 0
+    room_obj.scores = {}
+    room_obj.stop_triggered = False
+    room_obj.consecutive_wrong = 0
+    room_obj.test_completed = False
+    room_obj.supplementary_recommended = []
+    room_obj.supplementary_active = False
+
+    dom, sub = room_obj.get_current_domain_and_subtest()
+    if dom and sub:
+        room_obj.scores[f"{dom}_{sub}"] = []
+    return {"status": "ok"}
+
 @app.post("/api/grade")
-async def api_grade(req: GradeRequest):
+def api_grade(req: GradeRequest):
+    if req.room_id not in ROOMS:
+        return JSONResponse(status_code=404, content={"error": "invalid_room"})
+    room_obj = ROOMS[req.room_id]
     score = req.score
-    dom, sub = get_current_domain_and_subtest()
+    dom, sub = room_obj.get_current_domain_and_subtest()
+    
     if dom and sub:
         sub_key = f"{dom}_{sub}"
-        if sub_key not in state.scores:
-            state.scores[sub_key] = []
-        state.scores[sub_key].append(score)
-
+        if sub_key not in room_obj.scores:
+            room_obj.scores[sub_key] = []
+        
+        room_obj.scores[sub_key].append(score)
+        
         if score == 0:
-            state.consecutive_wrong += 1
+            room_obj.consecutive_wrong += 1
         else:
-            state.consecutive_wrong = 0
-
+            room_obj.consecutive_wrong = 0
+            
         subtest_data = TEST_CONTENT[dom]["subtests"][sub]
         stop_threshold = subtest_data.get("stop_rule", 3)
-
-        if state.consecutive_wrong >= stop_threshold:
-            state.stop_triggered = True
-            state.consecutive_wrong = 0
+        
+        if room_obj.consecutive_wrong >= stop_threshold:
+            room_obj.stop_triggered = True
+            room_obj.consecutive_wrong = 0
         else:
-            current_len = len(state.scores[sub_key])
+            current_len = len(room_obj.scores[sub_key])
             total_q_len = len(subtest_data["questions"])
             if current_len >= total_q_len:
-                await advance_next_step()
-    return JSONResponse(content=build_payload())
+                room_obj.advance_next_step()
+                
+    return {"status": "ok"}
 
 @app.post("/api/skip")
-async def api_skip():
-    await advance_next_step()
-    return JSONResponse(content=build_payload())
+def api_skip(req: ActionRequest):
+    if req.room_id in ROOMS:
+        ROOMS[req.room_id].advance_next_step()
+    return {"status": "ok"}
 
 @app.post("/api/resume")
-async def api_resume():
-    state.stop_triggered = False
-    await advance_next_step()
-    return JSONResponse(content=build_payload())
+def api_resume(req: ActionRequest):
+    if req.room_id in ROOMS:
+        room_obj = ROOMS[req.room_id]
+        room_obj.stop_triggered = False
+        room_obj.advance_next_step()
+    return {"status": "ok"}
 
 @app.post("/api/supplementary")
-async def api_supplementary():
-    state.supplementary_active = True
-    state.test_completed = False
-    state.stop_triggered = False
-    state.current_question_idx = 0
-
-    supp_domains = []
-    for rec_name in state.supplementary_recommended:
-        if "음운" in rec_name:
-            supp_domains.append(("phoneme", "blending"))
-        if "글자" in rec_name:
-            supp_domains.append(("word", "letter"))
-            supp_domains.append(("word", "regular_word"))
-
-    PRESET_MAPPING["supplementary"] = {
-        "name": "보완 정밀 진단검사 모드",
-        "domains": supp_domains
-    }
-    state.preset_mode = "supplementary"
-    state.scores = {}
-    state.supplementary_recommended = []
-
-    dom, sub = get_current_domain_and_subtest()
-    if dom and sub:
-        state.scores[f"{dom}_{sub}"] = []
-    return JSONResponse(content=build_payload())
+def api_supplementary(req: ActionRequest):
+    if req.room_id in ROOMS:
+        room_obj = ROOMS[req.room_id]
+        room_obj.supplementary_active = True
+        room_obj.test_completed = False
+        room_obj.stop_triggered = False
+        room_obj.current_question_idx = 0
+        
+        supp_domains = []
+        for rec_name in room_obj.supplementary_recommended:
+            if "음운" in rec_name:
+                supp_domains.append(("phoneme", "blending"))
+            if "글자" in rec_name:
+                supp_domains.append(("word", "letter"))
+                supp_domains.append(("word", "regular_word"))
+        
+        PRESET_MAPPING["supplementary"] = {
+            "name": "보완 정밀 진단검사 모드",
+            "domains": supp_domains
+        }
+        room_obj.preset_mode = "supplementary"
+        room_obj.scores = {}
+        room_obj.supplementary_recommended = []
+        
+        dom, sub = room_obj.get_current_domain_and_subtest()
+        if dom and sub:
+            room_obj.scores[f"{dom}_{sub}"] = []
+    return {"status": "ok"}
 
 @app.post("/api/reset")
-async def api_reset():
-    state.student_name = ""
-    state.student_grade = ""
-    state.preset_mode = ""
-    state.scores = {}
-    state.stop_triggered = False
-    state.consecutive_wrong = 0
-    state.test_completed = False
-    state.supplementary_recommended = []
-    state.supplementary_active = False
-    return JSONResponse(content=build_payload())
+def api_reset(req: ActionRequest):
+    if req.room_id in ROOMS:
+        room_obj = ROOMS[req.room_id]
+        room_obj.student_name = ""
+        room_obj.student_grade = ""
+        room_obj.preset_mode = ""
+        room_obj.scores = {}
+        room_obj.stop_triggered = False
+        room_obj.consecutive_wrong = 0
+        room_obj.test_completed = False
+        room_obj.supplementary_recommended = []
+        room_obj.supplementary_active = False
+    return {"status": "ok"}
 
+# 교사용 UI HTML
 TEACHER_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <title>교사용 스마트 채점 패널 (Teacher Panel)</title>
+    <title>교사용 스마트 채점 패널 (Multi-Room Teacher Panel)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Noto Sans KR', sans-serif; background-color: #f0f2f5; margin: 0; padding: 0; color: #333; }
-        .header { background-color: #1e3a8a; color: white; padding: 15px 20px; font-size: 1.2rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; }
+        .header { background-color: #1e3a8a; color: white; padding: 15px 20px; font-size: 1.1rem; font-weight: 700; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .pin-badge { background-color: #f59e0b; color: #000; padding: 6px 14px; border-radius: 20px; font-size: 1.2rem; font-weight: 800; letter-spacing: 1px; }
         .container { max-width: 900px; margin: 20px auto; padding: 10px; }
         .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 25px; margin-bottom: 20px; }
         .form-group { margin-bottom: 15px; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
-        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
+        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; box-sizing: border-border-box; }
         button { background-color: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background 0.2s; }
         button:hover { background-color: #1d4ed8; }
         .btn-correct { background-color: #10b981; font-size: 1.3rem; padding: 15px 35px; }
@@ -415,16 +489,30 @@ TEACHER_HTML = """
         .badge-danger { background-color: #ef4444; }
         .bar-chart { background-color: #e2e8f0; border-radius: 4px; height: 24px; width: 100%; margin-top: 5px; overflow: hidden; }
         .bar-fill { background-color: #3b82f6; height: 100%; }
+        .pin-box { background: #eff6ff; border: 2px dashed #3b82f6; padding: 15px; border-radius: 8px; text-align: center; margin-bottom: 20px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <div>🔍 국립특수교육원 기초학습기능검사 스마트 채점 시스템</div>
-        <div id="connection-status" style="color: #6ee7b7;">🟢 기기 연동 완료 (HTTP 1초 자동 동기화)</div>
+        <div>🔍 국립특수교육원 기초학습기능검사 스마트 채점 패널</div>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <span>🔑 내 방 번호(PIN):</span>
+            <span id="pin-display" class="pin-badge">생성 중...</span>
+            <button onclick="createNewRoom()" style="padding:6px 12px; font-size:0.85rem; background:#475569;">🔄 새 방 만들기</button>
+        </div>
     </div>
     <div class="container">
         
+        <!-- 1. 아동 등록 카드 -->
         <div id="card-setup" class="card">
+            <div class="pin-box">
+                <h3 style="margin:0 0 5px 0; color:#1e3a8a;">📱 아동용 태블릿 접속 방법</h3>
+                <p style="margin:0; font-size:1.1rem; color:#1e293b;">
+                    태블릿 브라우저에서 아래 주소로 접속한 후, 방 번호 <strong id="student-pin-hint" style="color:#d97706; font-size:1.4rem;">----</strong>를 입력하세요.<br>
+                    <small style="color:#64748b;">(직접 접속 주소: <a id="direct-student-link" href="#" target="_blank" style="color:#2563eb; font-weight:700;">/student?room=...</a>)</small>
+                </p>
+            </div>
+
             <h2 style="margin-top:0;">📝 평가 아동 정보 등록</h2>
             <div class="form-group">
                 <label>아동 이름</label>
@@ -443,18 +531,18 @@ TEACHER_HTML = """
                 </select>
             </div>
             <div class="form-group">
-                <label>생애주기 진단 목적 (프리셋)</label>
+                <label>대상별 진단 모듈 선택 (프리셋)</label>
                 <select id="select-preset">
-                    <option value="1">1. 유치원 입학 (조기 선별 모드)</option>
-                    <option value="2" selected>2. 초등학교 입학 (초1 기초 문해력 진단)</option>
-                    <option value="3">3. 초등학교 3학년 발달지체 재심의 (장애 재분류 모드)</option>
-                    <option value="4">4. 중학교 입학 (중1 교과 학습 대비 진단)</option>
-                    <option value="5">5. 고등학교 입학 (전환기 기능적 평가 모드)</option>
+                    <option value="1" selected>1. 초1 (기초 해독 & 문해력 스크리닝 모드)</option>
+                    <option value="2">2. 초3 발달지체 재심의 (결손 보완 분기 모드)</option>
+                    <option value="3">3. 중입 (초6~중1 교과 문해력 진단 모드)</option>
+                    <option value="4">4. 고입 (~중3 전환기 기능적 평가 모드)</option>
                 </select>
             </div>
-            <button onclick="startSession()">🚀 아동용 패널 연동 및 검사 시작</button>
+            <button onclick="startSession()" style="width:100%; font-size:1.2rem; padding:15px;">🚀 아동용 패널 연동 및 검사 시작</button>
         </div>
 
+        <!-- 2. 실시간 검사 통제 카드 -->
         <div id="card-exam" class="card" style="display:none;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <h3 id="exam-domain" style="margin:0; color:#1e3a8a;"></h3>
@@ -466,6 +554,7 @@ TEACHER_HTML = """
                 ⚠️ 경고: 연속 2회 오답! 1번 더 틀리면 자동 중지 규칙이 작동합니다.
             </div>
 
+            <!-- 현재 문제 제시 카드 -->
             <div style="background-color:#f8fafc; border-left:6px solid #2563eb; padding:20px; border-radius:4px; margin:15px 0;">
                 <div style="font-size:0.9rem; color:#64748b;">아동 화면 송출 중:</div>
                 <div id="exam-question" style="font-size:2.5rem; font-weight:700; margin:10px 0; color:#0f172a;"></div>
@@ -474,11 +563,13 @@ TEACHER_HTML = """
                 <div id="exam-answer" style="font-size:1.1rem; color:#10b981; font-weight:700; margin-top:5px;"></div>
             </div>
 
+            <!-- 현재 하위검사 실시간 득점 현황 -->
             <div id="subtest-score-flow" style="margin:15px 0;">
                 <span style="font-weight:500; color:#64748b; margin-right:10px;">현재 영역 채점 현황:</span>
                 <span id="score-flow-container"></span>
             </div>
 
+            <!-- 채점 및 통제 버튼 -->
             <div class="grid-buttons" id="exam-actions">
                 <button class="btn-correct" onclick="gradeItem(1)">🟢 맞음 (1점)</button>
                 <button class="btn-wrong" onclick="gradeItem(0)">❌ 틀림 (0점)</button>
@@ -489,6 +580,7 @@ TEACHER_HTML = """
             </div>
         </div>
 
+        <!-- 3. 검사 중지 안내 카드 -->
         <div id="card-stop" class="card" style="display:none; border-top:8px solid #ef4444; text-align:center;">
             <h1 style="color:#ef4444; margin-top:0;">🛑 자동 중지 규칙(Stop Rule) 작동</h1>
             <p style="font-size:1.2rem; line-height:1.6;">
@@ -499,6 +591,7 @@ TEACHER_HTML = """
             <button onclick="resumeNextSubtest()" style="background-color:#10b981; font-size:1.2rem; padding:15px 30px;">다음 하위검사로 계속 진행하기 ➡️</button>
         </div>
 
+        <!-- 4. 결과 및 IEP 보고서 카드 -->
         <div id="card-report" class="card" style="display:none; border-top:8px solid #10b981;">
             <h1 style="color:#10b981; margin-top:0; text-align:center;">📊 진단평가 결과 및 IEP 권고 리포트</h1>
             <div style="background-color:#f1f5f9; padding:15px; border-radius:8px; margin-bottom:20px;">
@@ -510,6 +603,7 @@ TEACHER_HTML = """
                 </div>
             </div>
 
+            <!-- 영역별 점수 통계 표 및 그래프 -->
             <h3>📈 소검사별 수행도 프로파일</h3>
             <table class="report-table">
                 <thead>
@@ -524,12 +618,14 @@ TEACHER_HTML = """
                 </tbody>
             </table>
 
+            <!-- 보완검사 자동 분기 결과 안내 -->
             <div id="supplementary-section" class="card" style="display:none; background-color:#fffbeb; border:1px solid #fef3c7; margin-top:20px;">
                 <h3 style="margin-top:0; color:#d97706;">⚠️ 보완 진단검사 실시 추천</h3>
                 <p id="supplementary-message" style="line-height:1.5;"></p>
                 <button onclick="startSupplementaryTest()" style="background-color:#d97706;">보완 검사 연동 실시하기</button>
             </div>
 
+            <!-- 개별화 교육 중재(IEP) 전략 제안 -->
             <h3>💡 특수교육 중재 계획(IEP) 가이드라인</h3>
             <div id="iep-guideline-box" style="background-color:#eff6ff; border-left:6px solid #3b82f6; padding:15px; border-radius:4px; line-height:1.6;">
             </div>
@@ -542,73 +638,110 @@ TEACHER_HTML = """
     </div>
 
     <script>
-        async function fetchState() {
-            try {
-                let res = await fetch('/api/state');
-                let state = await res.json();
-                renderState(state);
-                document.getElementById("connection-status").innerHTML = "🟢 아동용 패널 및 서버 연동 활성화 (HTTP 1초 자동 동기화)";
-                document.getElementById("connection-status").style.color = "#6ee7b7";
-            } catch(e) {
-                document.getElementById("connection-status").innerHTML = "🟡 동기화 대기 중...";
-                document.getElementById("connection-status").style.color = "#f59e0b";
+        var currentRoomId = sessionStorage.getItem("teacher_room_id") || "";
+
+        function initRoom() {
+            if (!currentRoomId) {
+                createNewRoom();
+            } else {
+                updatePinDisplay(currentRoomId);
+                pollState();
             }
         }
 
-        // 1초마다 자동 동기화 Polling
-        setInterval(fetchState, 1000);
-        fetchState();
+        function createNewRoom() {
+            fetch('/api/create_room', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    currentRoomId = data.room_id;
+                    sessionStorage.setItem("teacher_room_id", currentRoomId);
+                    updatePinDisplay(currentRoomId);
+                    pollState();
+                });
+        }
 
-        async function startSession() {
+        function updatePinDisplay(pin) {
+            document.getElementById("pin-display").innerText = pin;
+            document.getElementById("student-pin-hint").innerText = pin;
+            var directUrl = window.location.origin + "/student?room=" + pin;
+            var linkElem = document.getElementById("direct-student-link");
+            linkElem.innerText = "/student?room=" + pin;
+            linkElem.href = directUrl;
+        }
+
+        function pollState() {
+            if (!currentRoomId) return;
+            fetch('/api/state?room=' + currentRoomId)
+                .then(res => {
+                    if (!res.ok) {
+                        createNewRoom();
+                        throw new Error('Room expired');
+                    }
+                    return res.json();
+                })
+                .then(state => {
+                    renderState(state);
+                })
+                .catch(err => console.log(err));
+        }
+
+        setInterval(pollState, 1000);
+
+        function startSession() {
             var name = document.getElementById("input-name").value;
             var grade = document.getElementById("select-grade").value;
             var preset = document.getElementById("select-preset").value;
             
-            let res = await fetch('/api/start', {
+            fetch('/api/start', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    student_name: name,
-                    student_grade: grade,
-                    preset_mode: preset
+                    "room_id": currentRoomId,
+                    "student_name": name,
+                    "student_grade": grade,
+                    "preset_mode": preset
                 })
-            });
-            let state = await res.json();
-            renderState(state);
+            }).then(() => pollState());
         }
 
-        async function gradeItem(isCorrect) {
-            let res = await fetch('/api/grade', {
+        function gradeItem(isCorrect) {
+            fetch('/api/grade', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ score: isCorrect })
-            });
-            let state = await res.json();
-            renderState(state);
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId, "score": isCorrect })
+            }).then(() => pollState());
         }
 
-        async function skipToNextSubtest() {
-            let res = await fetch('/api/skip', { method: 'POST' });
-            let state = await res.json();
-            renderState(state);
+        function skipToNextSubtest() {
+            fetch('/api/skip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId })
+            }).then(() => pollState());
         }
 
-        async function resumeNextSubtest() {
-            let res = await fetch('/api/resume', { method: 'POST' });
-            let state = await res.json();
-            renderState(state);
+        function resumeNextSubtest() {
+            fetch('/api/resume', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId })
+            }).then(() => pollState());
         }
 
-        async function startSupplementaryTest() {
-            let res = await fetch('/api/supplementary', { method: 'POST' });
-            let state = await res.json();
-            renderState(state);
+        function startSupplementaryTest() {
+            fetch('/api/supplementary', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId })
+            }).then(() => pollState());
         }
 
-        async function resetTest() {
-            let res = await fetch('/api/reset', { method: 'POST' });
-            let state = await res.json();
-            renderState(state);
+        function resetTest() {
+            fetch('/api/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId })
+            }).then(() => pollState());
         }
 
         function renderState(state) {
@@ -764,7 +897,7 @@ TEACHER_HTML = """
                 iepBox.innerHTML = `
                     <p style="margin-top:0;"><strong>📌 종합 학습지수 진단: 특수교육적 지원 필요</strong></p>
                     <ul>
-                        <li><strong>학습환경:</strong> 학생의 기초 문해력 및 어휘력에서 유의미한 지체가 관찰됩니다. 교사 혹은 특수교사와의 일대일 개별화 수업 배치를 적극 고려해 주세요.</li>
+                        <li><strong>학습환경:</strong> 학생의 기초 문해력 및 어휘력에서 유의미한 지치가 관찰됩니다. 교사 혹은 특수교사와의 일대일 개별화 수업 배치를 적극 고려해 주세요.</li>
                         <li><strong>어휘 중재 전략:</strong> 아동용 시각 카드(이모지, 일러스트)를 동반한 연상 자극 훈련을 통해 실생활 단어와 쓰기 영역을 다감각(Multisensory) 접근으로 설계해 주십시오.</li>
                         <li><strong>읽기 분석:</strong> 읽기 동작 표현 및 단어 해독 3초 타이밍 훈련(자동화 훈련)을 주 3회 15분 이상 매일 지속하는 것이 음운 결손 해소에 가장 효과적입니다.</li>
                     </ul>
@@ -779,11 +912,14 @@ TEACHER_HTML = """
                 `;
             }
         }
+
+        initRoom();
     </script>
 </body>
 </html>
 """
 
+# 아동용 UI HTML (PIN 입력 창 + 실시간 제시)
 STUDENT_HTML = """
 <!DOCTYPE html>
 <html>
@@ -793,25 +929,115 @@ STUDENT_HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Noto Sans KR', sans-serif; background-color: #ffffff; margin: 0; padding: 0; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; user-select: none; -webkit-user-select: none; }
-        .canvas-container { text-align: center; width: 90%; max-width: 1000px; }
-        .giant-text { font-size: 6.5rem; font-weight: 700; color: #0f172a; line-height: 1.3; word-break: keep-all; transition: all 0.2s ease-in-out; }
-        .giant-emoji { font-size: 10rem; margin-bottom: 20px; }
-        .story-text { font-size: 2.2rem; line-height: 1.6; text-align: left; background-color: #f8fafc; padding: 30px; border-radius: 12px; border: 2px solid #e2e8f0; max-height: 70vh; overflow-y: auto; }
-        .waiting-screen { color: #64748b; }
-        .waiting-text { font-size: 2.5rem; margin-top: 20px; }
-        .pulse { animation: pulse-animation 2s infinite; }
-        @keyframes pulse-animation { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background-color: #ffffff;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .canvas-container {
+            text-align: center;
+            width: 90%;
+            max-width: 1000px;
+        }
+        .giant-text {
+            font-size: 6.5rem;
+            font-weight: 700;
+            color: #0f172a;
+            line-height: 1.3;
+            word-break: keep-all;
+            transition: all 0.2s ease-in-out;
+        }
+        .giant-emoji {
+            font-size: 10rem;
+            margin-bottom: 20px;
+        }
+        .story-text {
+            font-size: 2.2rem;
+            line-height: 1.6;
+            text-align: left;
+            background-color: #f8fafc;
+            padding: 30px;
+            border-radius: 12px;
+            border: 2px solid #e2e8f0;
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+        .waiting-screen {
+            color: #64748b;
+        }
+        .waiting-text {
+            font-size: 2.5rem;
+            margin-top: 20px;
+        }
+        .pulse {
+            animation: pulse-animation 2s infinite;
+        }
+        @keyframes pulse-animation {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        .pin-input-box {
+            background-color: #f1f5f9;
+            padding: 40px;
+            border-radius: 16px;
+            border: 2px dashed #94a3b8;
+            max-width: 450px;
+            margin: 0 auto;
+        }
+        .pin-input-field {
+            font-size: 3rem;
+            font-weight: 800;
+            letter-spacing: 10px;
+            text-align: center;
+            width: 220px;
+            padding: 10px;
+            border: 3px solid #3b82f6;
+            border-radius: 12px;
+            margin: 20px 0;
+            outline: none;
+        }
+        .pin-submit-btn {
+            background-color: #2563eb;
+            color: white;
+            font-size: 1.5rem;
+            font-weight: 700;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
     <div class="canvas-container">
         
-        <div id="student-waiting" class="waiting-screen">
+        <!-- 0. PIN 번호 입력 화면 -->
+        <div id="student-pin-screen" class="pin-input-box">
+            <div style="font-size: 4rem;">🔑</div>
+            <h2 style="font-size: 2rem; color: #1e293b; margin: 10px 0;">선생님 방 번호(PIN) 입력</h2>
+            <p style="color: #64748b; font-size: 1.2rem; margin: 0;">교사 화면에 표시된 4자리 숫자를 입력하세요.</p>
+            <input type="text" id="pin-input" class="pin-input-field" maxlength="4" placeholder="1234">
+            <br>
+            <button class="pin-submit-btn" onclick="submitPin()">검사방 입장하기 ➡️</button>
+            <p id="pin-error-msg" style="color: #ef4444; font-size: 1.1rem; margin-top: 15px; display: none;"></p>
+        </div>
+
+        <!-- 1. 대기 화면 또는 자동중지 완료시 화면 -->
+        <div id="student-waiting" class="waiting-screen" style="display:none;">
             <div class="giant-emoji pulse">📖</div>
             <div class="waiting-text" id="waiting-message">반갑습니다!<br>선생님과 함께 재미있는 공부를 시작해봐요.</div>
         </div>
 
+        <!-- 2. 글자 또는 삽화 자극 화면 -->
         <div id="student-exam" style="display:none;">
             <div id="question-area" class="giant-text"></div>
         </div>
@@ -819,17 +1045,63 @@ STUDENT_HTML = """
     </div>
 
     <script>
-        async function fetchStudentState() {
-            try {
-                let res = await fetch('/api/state');
-                let state = await res.json();
-                renderStudentState(state);
-            } catch(e) {}
+        var studentRoomId = "";
+
+        // URL 파라미터에서 room 추출 (?room=1234)
+        function checkUrlRoom() {
+            var urlParams = new URLSearchParams(window.location.search);
+            var roomParam = urlParams.get('room');
+            if (roomParam && roomParam.length === 4) {
+                studentRoomId = roomParam;
+                document.getElementById("pin-input").value = roomParam;
+                connectToRoom(studentRoomId);
+            }
         }
 
-        // 1초마다 자동 동기화 Polling
-        setInterval(fetchStudentState, 1000);
-        fetchStudentState();
+        function submitPin() {
+            var inputVal = document.getElementById("pin-input").value.trim();
+            if (inputVal.length !== 4) {
+                showError("4자리 숫자 PIN 번호를 정확히 입력해주세요.");
+                return;
+            }
+            connectToRoom(inputVal);
+        }
+
+        function showError(msg) {
+            var errElem = document.getElementById("pin-error-msg");
+            errElem.innerText = msg;
+            errElem.style.display = "block";
+        }
+
+        function connectToRoom(roomId) {
+            fetch('/api/state?room=' + roomId)
+                .then(res => {
+                    if (!res.ok) {
+                        throw new Error("존재하지 않는 방 번호입니다.");
+                    }
+                    return res.json();
+                })
+                .then(state => {
+                    studentRoomId = roomId;
+                    document.getElementById("student-pin-screen").style.display = "none";
+                    document.getElementById("pin-error-msg").style.display = "none";
+                    renderStudentState(state);
+                    startPolling();
+                })
+                .catch(err => {
+                    showError("⚠️ " + err.message);
+                });
+        }
+
+        function startPolling() {
+            setInterval(function() {
+                if (!studentRoomId) return;
+                fetch('/api/state?room=' + studentRoomId)
+                    .then(res => res.json())
+                    .then(state => renderStudentState(state))
+                    .catch(err => console.log(err));
+            }, 1000);
+        }
 
         function renderStudentState(state) {
             var waitingDiv = document.getElementById("student-waiting");
@@ -877,6 +1149,8 @@ STUDENT_HTML = """
 
             qArea.innerText = questionText;
         }
+
+        checkUrlRoom();
     </script>
 </body>
 </html>
@@ -893,16 +1167,25 @@ async def get_student():
 @app.get("/", response_class=HTMLResponse)
 async def redirect_root():
     return HTMLResponse(content="""
-    <div style="font-family: sans-serif; text-align: center; margin-top: 100px;">
-        <h2>🎒 국립특수교육원 기초학습기능검사 스마트 연동 시스템</h2>
-        <p>각 태블릿 PC의 브라우저에서 아래 주소로 각각 접속해 주세요:</p>
-        <div style="margin: 20px auto; display: inline-block; text-align: left; background: #f1f5f9; padding: 20px; border-radius: 8px;">
-            <h4>📱 기기별 접속 주소 가이드:</h4>
-            <li><strong>교사용 태블릿:</strong> <a href="/teacher" target="_blank" style="color: blue; text-decoration: none; font-weight: bold;">[여기를 클릭하여 이동] 또는 주소창에 /teacher 입력</a></li>
-            <li><strong>아동용 태블릿:</strong> <a href="/student" target="_blank" style="color: green; text-decoration: none; font-weight: bold;">[여기를 클릭하여 이동] 또는 주소창에 /student 입력</a></li>
+    <div style="font-family: sans-serif; text-align: center; margin-top: 60px; padding: 20px;">
+        <h2>🎒 국립특수교육원 기초학습기능검사 다중방 스마트 연동 시스템</h2>
+        <p style="color: #475569; font-size: 1.1rem;">여러 선생님께서 동시에 독립적으로 각자의 아동을 평가하실 수 있습니다.</p>
+        
+        <div style="margin: 30px auto; max-width: 600px; text-align: left; background: #f8fafc; padding: 30px; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+            <h3 style="margin-top:0; color:#1e3a8a;">📱 접속 안내:</h3>
+            <div style="margin-bottom: 20px;">
+                <p><strong>1. 교사 채점용 패널:</strong></p>
+                <a href="/teacher" style="display:inline-block; background:#2563eb; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">📱 교사용 화면 바로가기 (새 방 생성)</a>
+            </div>
+            <hr style="border:0; border-top:1px solid #cbd5e1; margin:20px 0;">
+            <div>
+                <p><strong>2. 아동 제시용 태블릿:</strong></p>
+                <a href="/student" style="display:inline-block; background:#10b981; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">💻 아동용 화면 바로가기 (PIN 입력)</a>
+            </div>
         </div>
     </div>
     """)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = 8000
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
