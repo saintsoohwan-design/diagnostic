@@ -8,7 +8,7 @@ import socket
 import random
 import time
 
-app = FastAPI(title="국립특수교육원 기초학습능력 통합 스크리닝 시스템 v8 (Reading, Writing, Math 25-Min Integrated)")
+app = FastAPI(title="국립특수교육원 기초학습능력 통합 스크리닝 시스템 v9 (Reading, Writing, Math 25-Min Integrated)")
 
 # 검사 데이터 정의 (국어 읽기/쓰기 & 수학 통합)
 TEST_CONTENT = {
@@ -71,7 +71,7 @@ TEST_CONTENT = {
                 "type": "text_flow",
                 "questions": [
                     {
-                        "q": "개는 사람이 집에서 기르는 동물 중에서 가장 오래된 동물입니다. 그래서 세계 어느 나라에서나 개를 기르는 모습을 볼 수 있습니다. 우리나라에서 옛날부터 기르던 개로는 진돗개, 삽살개, 풍산개가 있습니다...", 
+                        "q": "개는 사람이 집에서 기르는 동물 중에서 가장 오래된 동물입니다. 그래서 세계 어느 나라에서나 개를 기르는 모습을 볼 수 있습니다. 우리나라에서 옛날부터 기르던 개로는 진돗개, 삽살개, 풍산개가 있습니다. 이들은 각각 다른 특수성을 가지고 있습니다...", 
                         "a": "분당 정확히 읽은 음절 수 채점", 
                         "guide": "아동이 1분 동안 소리 내어 글을 읽도록 하고 오독 수/어절을 채점하세요."
                     }
@@ -269,6 +269,50 @@ class RoomState:
             self.test_completed = True
             self.analyze_supplementary_recommendations()
 
+    def go_back_prev_step(self):
+        # 1. If completed, reopen test
+        if self.test_completed:
+            self.test_completed = False
+            if self.preset_mode in PRESET_MAPPING:
+                domains = PRESET_MAPPING[self.preset_mode]["domains"]
+                self.current_question_idx = len(domains) - 1
+
+        # 2. If stop_triggered, cancel stop trigger
+        if self.stop_triggered:
+            self.stop_triggered = False
+
+        dom, sub = self.get_current_domain_and_subtest()
+        
+        # 3. If current subtest has scores, pop the last score
+        if dom and sub:
+            sub_key = f"{dom}_{sub}"
+            if sub_key in self.scores and len(self.scores[sub_key]) > 0:
+                self.scores[sub_key].pop()
+                self._recalc_consecutive_wrong(sub_key)
+                return
+        
+        # 4. If current subtest has no scores, go back to previous subtest
+        if self.current_question_idx > 0:
+            self.current_question_idx -= 1
+            prev_dom, prev_sub = self.get_current_domain_and_subtest()
+            if prev_dom and prev_sub:
+                prev_sub_key = f"{prev_dom}_{prev_sub}"
+                if prev_sub_key in self.scores and len(self.scores[prev_sub_key]) > 0:
+                    self.scores[prev_sub_key].pop()
+                    self._recalc_consecutive_wrong(prev_sub_key)
+
+    def _recalc_consecutive_wrong(self, sub_key):
+        if sub_key not in self.scores:
+            self.consecutive_wrong = 0
+            return
+        cnt = 0
+        for s in reversed(self.scores[sub_key]):
+            if s == 0:
+                cnt += 1
+            else:
+                break
+        self.consecutive_wrong = cnt
+
     def analyze_supplementary_recommendations(self):
         korean_score_sum = 0
         korean_count = 0
@@ -388,6 +432,13 @@ def api_grade(req: GradeRequest):
                 
     return {"status": "ok"}
 
+@app.post("/api/prev")
+def api_prev(req: ActionRequest):
+    if req.room_id in ROOMS:
+        room_obj = ROOMS[req.room_id]
+        room_obj.go_back_prev_step()
+    return {"status": "ok"}
+
 @app.post("/api/skip")
 def api_skip(req: ActionRequest):
     if req.room_id in ROOMS:
@@ -455,7 +506,7 @@ TEACHER_HTML = """
 <html>
 <head>
     <meta charset="utf-8">
-    <title>교사용 기초학습능력 통합 스크리닝 패널 v8</title>
+    <title>교사용 기초학습능력 통합 스크리닝 패널 v9</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -491,9 +542,10 @@ TEACHER_HTML = """
 </head>
 <body>
     <div class="header">
-        <div>🔍 국립특수교육원 기초학습능력 25분 통합 스크리닝 (Reading, Writing, Math)</div>
-        <div style="display:flex; align-items:center; gap:10px;">
-            <span>🔑 내 방 번호(PIN):</span>
+        <div>🔍 국립특수교육원 기초학습능력 25분 통합 스크리닝 패널</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <button onclick="resetToHome()" style="padding:6px 14px; font-size:0.85rem; background:#2563eb; color:white; border-radius:6px; font-weight:700;">🏠 맨 처음으로 (홈)</button>
+            <span>🔑 PIN:</span>
             <span id="pin-display" class="pin-badge">생성 중...</span>
             <button onclick="createNewRoom()" style="padding:6px 12px; font-size:0.85rem; background:#475569;">🔄 새 방 만들기</button>
         </div>
@@ -581,8 +633,9 @@ TEACHER_HTML = """
                 <button class="btn-wrong" onclick="gradeItem(0)">❌ 틀림 (0점)</button>
             </div>
             
-            <div style="margin-top:20px; text-align:right;">
-                <button class="btn-stop" onclick="skipToNextSubtest()">하위검사 건너뛰기 ➡️</button>
+            <div style="margin-top:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+                <button onclick="prevItem()" style="background-color:#64748b; color:white; border:none; padding:10px 18px; border-radius:8px; font-size:0.95rem; cursor:pointer;">⬅️ 이전 문항으로 (수정)</button>
+                <button class="btn-stop" onclick="skipToNextSubtest()" style="padding:10px 18px; font-size:0.95rem;">하위검사 건너뛰기 ➡️</button>
             </div>
         </div>
 
@@ -594,18 +647,43 @@ TEACHER_HTML = """
                 해당 하위검사를 중지하고 다음 검사로 전환합니다.
             </p>
             <p style="color:#64748b;">(아동 화면은 편안한 대기 화면으로 자동 복구되었습니다.)</p>
-            <button onclick="resumeNextSubtest()" style="background-color:#10b981; font-size:1.2rem; padding:15px 30px;">다음 하위검사로 계속 진행하기 ➡️</button>
+            <div style="display:flex; justify-content:center; gap:12px; margin-top:20px; flex-wrap:wrap;">
+                <button onclick="prevItem()" style="background-color:#64748b; font-size:1.05rem; padding:12px 24px;">⬅️ 이전 문항으로 돌아가기 (오답 수정)</button>
+                <button onclick="resumeNextSubtest()" style="background-color:#10b981; font-size:1.05rem; padding:12px 24px;">다음 하위검사로 계속 진행하기 ➡️</button>
+            </div>
         </div>
 
         <!-- 4. 결과 및 IEP 보고서 카드 -->
         <div id="card-report" class="card" style="display:none; border-top:8px solid #10b981;">
-            <h1 style="color:#10b981; margin-top:0; text-align:center;">📊 기초학습능력 통합 스크리닝 결과 & IEP 권고 리포트</h1>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+                <h1 style="color:#10b981; margin:0;">📊 기초학습능력 통합 스크리닝 최종 결과 리포트</h1>
+                <button onclick="resetToHome()" style="background-color:#2563eb; color:white; padding:8px 16px; border-radius:6px; font-weight:700;">🏠 맨 처음 화면으로 돌아가기</button>
+            </div>
+
             <div style="background-color:#f1f5f9; padding:15px; border-radius:8px; margin-bottom:20px;">
                 <h3 style="margin-top:0; color:#334155;">피평가자 인적사항</h3>
                 <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
                     <div>👤 <strong>이름:</strong> <span id="rep-name"></span></div>
                     <div>🎒 <strong>연령/학년:</strong> <span id="rep-grade"></span></div>
                     <div>📑 <strong>진단모듈:</strong> <span id="rep-preset"></span></div>
+                </div>
+            </div>
+
+            <!-- 종합 결과 요약 박스 -->
+            <div style="background-color:#f8fafc; border:2px solid #cbd5e1; border-radius:10px; padding:20px; margin-bottom:25px; display:flex; justify-content:space-around; align-items:center; flex-wrap:wrap; text-align:center; gap:15px;">
+                <div>
+                    <div style="font-size:0.9rem; color:#64748b;">총 득점 / 평가 문항 수</div>
+                    <div style="font-size:1.8rem; font-weight:800; color:#1e293b;"><span id="rep-total-score">0 / 0</span></div>
+                </div>
+                <div style="border-left:1px solid #cbd5e1; height:40px;"></div>
+                <div>
+                    <div style="font-size:0.9rem; color:#64748b;">종합 정답률</div>
+                    <div style="font-size:1.8rem; font-weight:800; color:#2563eb;"><span id="rep-total-pct">0%</span></div>
+                </div>
+                <div style="border-left:1px solid #cbd5e1; height:40px;"></div>
+                <div>
+                    <div style="font-size:0.9rem; color:#64748b;">종합 진단 판정</div>
+                    <div style="font-size:1.3rem; font-weight:800;" id="rep-total-level"><span class="badge badge-info">정상</span></div>
                 </div>
             </div>
 
@@ -636,8 +714,9 @@ TEACHER_HTML = """
             <div id="iep-guideline-box" style="background-color:#eff6ff; border-left:6px solid #3b82f6; padding:15px; border-radius:4px; line-height:1.6;">
             </div>
             
-            <div style="margin-top:25px; text-align:center;">
-                <button onclick="resetTest()" style="background-color:#64748b;">🔄 새 아동 검사 실시하기</button>
+            <div style="margin-top:25px; display:flex; justify-content:center; gap:15px; flex-wrap:wrap;">
+                <button onclick="prevItem()" style="background-color:#64748b; font-size:1.05rem; padding:12px 24px;">⬅️ 마지막 문항으로 돌아가서 수정</button>
+                <button onclick="resetToHome()" style="background-color:#2563eb; font-size:1.05rem; padding:12px 24px;">🏠 맨 처음 화면으로 돌아가기</button>
             </div>
         </div>
 
@@ -645,6 +724,12 @@ TEACHER_HTML = """
 
     <script>
         var currentRoomId = sessionStorage.getItem("teacher_room_id") || "";
+
+        function resetToHome() {
+            if (confirm("현재 상태를 초기화하고 맨 처음 등록 화면으로 돌아가시겠습니까?")) {
+                resetTest();
+            }
+        }
 
         function autoSelectPreset() {
             var gradeVal = document.getElementById("select-grade").value;
@@ -736,6 +821,14 @@ TEACHER_HTML = """
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ "room_id": currentRoomId, "score": isCorrect })
+            }).then(() => pollState());
+        }
+
+        function prevItem() {
+            fetch('/api/prev', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ "room_id": currentRoomId })
             }).then(() => pollState());
         }
 
@@ -907,6 +1000,19 @@ TEACHER_HTML = """
                 totalPossible += subTotal;
             }
 
+            var overallPct = totalPossible > 0 ? Math.round((totalCorrect / totalPossible) * 100) : 0;
+            document.getElementById("rep-total-score").innerText = totalCorrect + " / " + totalPossible;
+            document.getElementById("rep-total-pct").innerText = overallPct + "%";
+            
+            var overallLevelElem = document.getElementById("rep-total-level");
+            if (overallPct < 50) {
+                overallLevelElem.innerHTML = `<span class="badge badge-danger" style="font-size:1.1rem; padding:6px 12px;">장애 위험군</span>`;
+            } else if (overallPct < 80) {
+                overallLevelElem.innerHTML = `<span class="badge badge-warning" style="font-size:1.1rem; padding:6px 12px;">경계선 / 학습지체</span>`;
+            } else {
+                overallLevelElem.innerHTML = `<span class="badge badge-info" style="font-size:1.1rem; padding:6px 12px;">정상 범주</span>`;
+            }
+
             var suppSection = document.getElementById("supplementary-section");
             if (state.supplementary_recommended.length > 0 && !state.supplementary_active) {
                 suppSection.style.display = "block";
@@ -999,69 +1105,66 @@ STUDENT_HTML = """
             font-size: 2.5rem;
             margin-top: 20px;
         }
-        .pulse {
-            animation: pulse-animation 2s infinite;
-        }
-        @keyframes pulse-animation {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
-        }
         .pin-input-box {
-            background-color: #f1f5f9;
+            background-color: #eff6ff;
+            border: 3px solid #3b82f6;
             padding: 40px;
             border-radius: 16px;
-            border: 2px dashed #94a3b8;
             max-width: 450px;
             margin: 0 auto;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
         }
-        .pin-input-field {
-            font-size: 3rem;
-            font-weight: 800;
-            letter-spacing: 10px;
+        .pin-input {
+            width: 80%;
+            padding: 15px;
+            font-size: 2.5rem;
             text-align: center;
-            width: 220px;
-            padding: 10px;
-            border: 3px solid #3b82f6;
-            border-radius: 12px;
+            letter-spacing: 10px;
+            border: 2px solid #cbd5e1;
+            border-radius: 8px;
             margin: 20px 0;
-            outline: none;
+            font-weight: 700;
         }
-        .pin-submit-btn {
+        .btn-enter {
             background-color: #2563eb;
             color: white;
-            font-size: 1.5rem;
-            font-weight: 700;
-            padding: 12px 30px;
             border: none;
-            border-radius: 10px;
+            padding: 15px 30px;
+            font-size: 1.5rem;
+            border-radius: 8px;
             cursor: pointer;
+            width: 85%;
+            font-weight: 700;
         }
     </style>
 </head>
 <body>
     <div class="canvas-container">
         
-        <!-- 0. PIN 번호 입력 화면 -->
-        <div id="student-pin-screen" class="pin-input-box">
-            <div style="font-size: 4rem;">🔑</div>
-            <h2 style="font-size: 2rem; color: #1e293b; margin: 10px 0;">선생님 방 번호(PIN) 입력</h2>
-            <p style="color: #64748b; font-size: 1.2rem; margin: 0;">교사 화면에 표시된 4자리 숫자를 입력하세요.</p>
-            <input type="text" id="pin-input" class="pin-input-field" maxlength="4" placeholder="1234">
+        <!-- 1. PIN 번호 입력 대기 화면 -->
+        <div id="pin-entry-screen" class="pin-input-box">
+            <h2 style="color:#1e3a8a; margin-top:0; font-size:2rem;">🔑 검사방 입장</h2>
+            <p style="color:#475569; font-size:1.2rem;">선생님 화면의 <strong>4자리 PIN 번호</strong>를 입력해 주세요.</p>
+            <input type="text" id="input-pin" class="pin-input" maxlength="4" placeholder="0000" pattern="[0-9]*" inputmode="numeric">
             <br>
-            <button class="pin-submit-btn" onclick="submitPin()">검사방 입장하기 ➡️</button>
-            <p id="pin-error-msg" style="color: #ef4444; font-size: 1.1rem; margin-top: 15px; display: none;"></p>
+            <button onclick="enterRoom()" class="btn-enter">검사방 입장하기 🚀</button>
         </div>
 
-        <!-- 1. 대기 화면 -->
-        <div id="student-waiting" class="waiting-screen" style="display:none;">
-            <div class="giant-emoji pulse">📖</div>
-            <div class="waiting-text" id="waiting-message">반갑습니다!<br>선생님과 함께 재미있는 공부를 시작해봐요.</div>
+        <!-- 2. 검사 대기 화면 -->
+        <div id="screen-waiting" class="waiting-screen" style="display:none;">
+            <div style="font-size: 8rem;">🎈</div>
+            <div class="waiting-text">선생님과 함께하는 즐거운 활동!<br>잠시만 기다려 주세요.</div>
         </div>
 
-        <!-- 2. 문제 자극 화면 -->
-        <div id="student-exam" style="display:none;">
-            <div id="question-area" class="giant-text"></div>
+        <!-- 3. 문제 제시 화면 -->
+        <div id="screen-question" style="display:none;">
+            <div id="question-display" class="giant-text"></div>
+        </div>
+
+        <!-- 4. 검사 완료 축하 화면 -->
+        <div id="screen-complete" class="waiting-screen" style="display:none;">
+            <div style="font-size: 8rem;">🎉</div>
+            <div class="waiting-text" style="color:#10b981; font-size:3rem;">참 잘했어요!<br>모든 활동이 완료되었습니다.</div>
         </div>
 
     </div>
@@ -1069,144 +1172,97 @@ STUDENT_HTML = """
     <script>
         var studentRoomId = "";
 
-        function checkUrlRoom() {
-            var urlParams = new URLSearchParams(window.location.search);
-            var roomParam = urlParams.get('room');
-            if (roomParam && roomParam.length === 4) {
-                studentRoomId = roomParam;
-                document.getElementById("pin-input").value = roomParam;
-                connectToRoom(studentRoomId);
-            }
+        var urlParams = new URLSearchParams(window.location.search);
+        var roomParam = urlParams.get('room');
+        if (roomParam) {
+            document.getElementById("input-pin").value = roomParam;
+            enterRoom();
         }
 
-        function submitPin() {
-            var inputVal = document.getElementById("pin-input").value.trim();
-            if (inputVal.length !== 4) {
-                showError("4자리 숫자 PIN 번호를 정확히 입력해주세요.");
+        function enterRoom() {
+            var pinVal = document.getElementById("input-pin").value.trim();
+            if (pinVal.length !== 4) {
+                alert("4자리 PIN 번호를 올바르게 입력해 주세요.");
                 return;
             }
-            connectToRoom(inputVal);
+            studentRoomId = pinVal;
+            document.getElementById("pin-entry-screen").style.display = "none";
+            document.getElementById("screen-waiting").style.display = "block";
+            pollStudentState();
         }
 
-        function showError(msg) {
-            var errElem = document.getElementById("pin-error-msg");
-            errElem.innerText = msg;
-            errElem.style.display = "block";
-        }
-
-        function connectToRoom(roomId) {
-            fetch('/api/state?room=' + roomId)
+        function pollStudentState() {
+            if (!studentRoomId) return;
+            fetch('/api/state?room=' + studentRoomId)
                 .then(res => {
                     if (!res.ok) {
-                        throw new Error("존재하지 않는 방 번호입니다.");
+                        alert("존재하지 않거나 만료된 방 번호입니다. 다시 확인해 주세요.");
+                        document.getElementById("pin-entry-screen").style.display = "block";
+                        document.getElementById("screen-waiting").style.display = "none";
+                        studentRoomId = "";
+                        throw new Error("Invalid room");
                     }
                     return res.json();
                 })
                 .then(state => {
-                    studentRoomId = roomId;
-                    document.getElementById("student-pin-screen").style.display = "none";
-                    document.getElementById("pin-error-msg").style.display = "none";
                     renderStudentState(state);
-                    startPolling();
                 })
-                .catch(err => {
-                    showError("⚠️ " + err.message);
-                });
+                .catch(err => console.log(err));
         }
 
-        function startPolling() {
-            setInterval(function() {
-                if (!studentRoomId) return;
-                fetch('/api/state?room=' + studentRoomId)
-                    .then(res => res.json())
-                    .then(state => renderStudentState(state))
-                    .catch(err => console.log(err));
-            }, 1000);
-        }
+        setInterval(pollStudentState, 1000);
 
         function renderStudentState(state) {
-            var waitingDiv = document.getElementById("student-waiting");
-            var examDiv = document.getElementById("student-exam");
-            var qArea = document.getElementById("question-area");
-            var waitingMsg = document.getElementById("waiting-message");
+            document.getElementById("pin-entry-screen").style.display = "none";
 
             if (!state.student_name) {
-                waitingDiv.style.display = "block";
-                examDiv.style.display = "none";
-                waitingMsg.innerHTML = "반갑습니다! 👋<br>선생님과 함께 재미있는 공부를 시작해봐요.";
+                showStudentScreen("screen-waiting");
                 return;
             }
 
             if (state.stop_triggered) {
-                waitingDiv.style.display = "block";
-                examDiv.style.display = "none";
-                waitingMsg.innerHTML = "🎨 정말 잘했어요!<br>잠시만 기다리시면 선생님께서 다음 활동을 안내해 주실 거예요.";
+                showStudentScreen("screen-waiting");
                 return;
             }
 
             if (state.test_completed) {
-                waitingDiv.style.display = "block";
-                examDiv.style.display = "none";
-                waitingMsg.innerHTML = "🌟 검사가 모두 끝났습니다! 🌟<br>열심히 공부해줘서 정말 고마워요!";
+                showStudentScreen("screen-complete");
                 return;
             }
 
-            waitingDiv.style.display = "none";
-            examDiv.style.display = "block";
+            showStudentScreen("screen-question");
+            var qElem = document.getElementById("question-display");
+            qElem.innerText = state.current_question;
 
-            var questionText = state.current_question;
-            
             if (state.is_ran_or_flow) {
-                if (questionText.length > 30) {
-                    qArea.className = "story-text";
-                } else {
-                    qArea.className = "giant-text";
-                    qArea.style.fontSize = "5.5rem";
-                }
+                qElem.className = "story-text";
             } else {
-                qArea.className = "giant-text";
-                qArea.style.fontSize = "7.5rem";
+                qElem.className = "giant-text";
             }
-
-            qArea.innerText = questionText;
         }
 
-        checkUrlRoom();
+        function showStudentScreen(screenId) {
+            document.getElementById("screen-waiting").style.display = "none";
+            document.getElementById("screen-question").style.display = "none";
+            document.getElementById("screen-complete").style.display = "none";
+            document.getElementById(screenId).style.display = "block";
+        }
     </script>
 </body>
 </html>
 """
 
+@app.get("/", response_class=HTMLResponse)
+def get_home():
+    return TEACHER_HTML
+
 @app.get("/teacher", response_class=HTMLResponse)
-async def get_teacher():
-    return HTMLResponse(content=TEACHER_HTML)
+def get_teacher():
+    return TEACHER_HTML
 
 @app.get("/student", response_class=HTMLResponse)
-async def get_student():
-    return HTMLResponse(content=STUDENT_HTML)
-
-@app.get("/", response_class=HTMLResponse)
-async def redirect_root():
-    return HTMLResponse(content="""
-    <div style="font-family: sans-serif; text-align: center; margin-top: 60px; padding: 20px;">
-        <h2>🎒 국립특수교육원 기초학습능력 통합 스크리닝 시스템 (Reading, Writing, Math)</h2>
-        <p style="color: #475569; font-size: 1.1rem;">국어 및 수학 3대 영역을 25분 안에 신속하게 평가하는 스마트 연동 시스템입니다.</p>
-        
-        <div style="margin: 30px auto; max-width: 600px; text-align: left; background: #f8fafc; padding: 30px; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-            <h3 style="margin-top:0; color:#1e3a8a;">📱 접속 안내:</h3>
-            <div style="margin-bottom: 20px;">
-                <p><strong>1. 교사 채점용 패널:</strong></p>
-                <a href="/teacher" style="display:inline-block; background:#2563eb; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">📱 교사용 화면 바로가기 (PIN 생성)</a>
-            </div>
-            <hr style="border:0; border-top:1px solid #cbd5e1; margin:20px 0;">
-            <div>
-                <p><strong>2. 아동 제시용 태블릿:</strong></p>
-                <a href="/student" style="display:inline-block; background:#10b981; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">💻 아동용 화면 바로가기 (PIN 입력)</a>
-            </div>
-        </div>
-    </div>
-    """)
+def get_student():
+    return STUDENT_HTML
 
 if __name__ == "__main__":
-    port = 8000
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
