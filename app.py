@@ -8,192 +8,183 @@ import socket
 import random
 import time
 
-app = FastAPI(title="국립특수교육원 기초학습기능검사 다중방 스마트 연동 시스템 (Multi-Room HTTP Polling)")
+app = FastAPI(title="국립특수교육원 기초학습능력 통합 스크리닝 시스템 v8 (Reading, Writing, Math 25-Min Integrated)")
 
-# 검사 데이터 정의
+# 검사 데이터 정의 (국어 읽기/쓰기 & 수학 통합)
 TEST_CONTENT = {
     "phoneme": {
-        "title": "I. 음운 처리",
+        "title": "I. 국어 - 음운 처리",
         "subtests": {
+            "ran_object": {
+                "name": "1. 빠른 이름대기 (RAN-사물 1분)",
+                "stop_rule": 99,
+                "type": "ran",
+                "questions": [
+                    {
+                        "q": "⚽️ 🍚 🐎 🥛 ✋ 🚗 🐶 🍎 🚲 👟", 
+                        "a": "축구공, 밥, 말, 컵, 손, 자동차, 강아지, 사과, 자전거, 신발", 
+                        "guide": "1분간 아동이 왼쪽에서 오른쪽으로 빠르게 그림 이름을 대도록 하세요. 교사는 오독/빠뜨린 항목만 체크합니다."
+                    }
+                ]
+            },
             "blending": {
-                "name": "1. 음절 합성",
+                "name": "2. 음절 합성 및 탈락",
                 "stop_rule": 3,
                 "questions": [
                     {"q": "/편/ + /지/", "a": "편지", "guide": "선생님: '/편/ 소리와 /지/ 소리를 합하면 무슨 소리가 될까요?'"},
                     {"q": "/토/ + /끼/", "a": "토끼", "guide": "선생님: '/토/ 소리와 /끼/ 소리를 합하면 무슨 소리가 될까요?'"},
-                    {"q": "/감/ + /사/", "a": "감사", "guide": "선생님: '/감/ 소리와 /사/ 소리를 합하면 무슨 소리가 될까요?'"},
-                    {"q": "/마/ + /음/", "a": "마음", "guide": "선생님: '/마/ 소리와 /음/ 소리를 합하면 무슨 소리가 될까요?'"},
-                    {"q": "/애/ + /벌/ + /레/", "a": "애벌레", "guide": "선생님: '/애/ 소리와 /벌/ 소리와 /레/ 소리를 합하면 무슨 소리가 될까요?'"},
                     {"q": "/비/ + /둘/ + /기/", "a": "비둘기", "guide": "선생님: '/비/ 소리와 /둘/ 소리와 /기/ 소리를 합하면 무슨 소리가 될까요?'"},
-                    {"q": "/방/ + /송/ + /국/", "a": "방송국", "guide": "선생님: '/방/ 소리와 /송/ 소리와 /국/ 소리를 합하면 무슨 소리가 될까요?'"},
-                    {"q": "/이/ + /야/ + /기/", "a": "이야기", "guide": "선생님: '/이/ 소리와 /야/ 소리와 /기/ 소리를 합하면 무슨 소리가 될까요?'"}
-                ]
-            },
-            "ran_object": {
-                "name": "6-1. 빠른 이름대기 (사물)",
-                "stop_rule": 99,
-                "type": "ran",
-                "questions": [
-                    {
-                        "q": "⚽️ 🍚 🐎 🥛 ✋", 
-                        "a": "축구공, 밥, 말, 컵, 손", 
-                        "guide": "1분간 아동이 왼쪽에서 오른쪽으로 빠르게 그림 이름을 대도록 하세요. 교사는 오독/빠뜨린 항목만 실시간 체크합니다."
-                    }
-                ]
-            },
-            "ran_color": {
-                "name": "6-2. 빠른 이름대기 (색깔)",
-                "stop_rule": 99,
-                "type": "ran",
-                "questions": [
-                    {
-                        "q": "🟥 🟨 🟩 🟦 ⬛", 
-                        "a": "빨강, 노랑, 초록, 파랑, 검정", 
-                        "guide": "1분간 아동이 빠르게 색깔 이름을 대도록 하세요."
-                    }
+                    {"q": "'산길'에서 '산'을 빼면?", "a": "길", "guide": "'산길'에서 '산' 소리를 빼고 남은 소리를 말해보세요."}
                 ]
             }
         }
     },
     "word": {
-        "title": "II. 글자·단어 인지",
+        "title": "II. 국어 - 글자·단어 인지",
         "subtests": {
             "letter": {
                 "name": "1. 낱글자 인지",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "ㄹ", "a": "리을", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅂ", "a": "비읍", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅈ", "a": "지읒", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅊ", "a": "치읓", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅎ", "a": "히읗", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅆ", "a": "쌍시옷", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㄲ", "a": "쌍기역", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"},
-                    {"q": "ㅌ", "a": "티읕", "guide": "이 낱글자의 이름은 무엇일까요? (3초 반응)"}
+                    {"q": "ㄹ", "a": "리을", "guide": "이 낱글자의 이름은 무엇일까요?"},
+                    {"q": "ㅂ", "a": "비읍", "guide": "이 낱글자의 이름은 무엇일까요?"},
+                    {"q": "ㅆ", "a": "쌍시옷", "guide": "이 낱글자의 이름은 무엇일까요?"}
                 ]
             },
-            "regular_word": {
-                "name": "2-1. 단어 인지 (규칙단어)",
+            "word_rec": {
+                "name": "2. 단어 인지 (규칙/불규칙)",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "감", "a": "감", "guide": "이 단어를 소리 내어 읽어보세요."},
                     {"q": "선물", "a": "선물", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "상", "a": "상", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "병원", "a": "병원", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "이루다", "a": "이루다", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "냄새", "a": "냄새", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "잔치", "a": "잔치", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "오랜만", "a": "오랜만", "guide": "이 단어를 소리 내어 읽어보세요."}
-                ]
-            },
-            "irregular_word": {
-                "name": "2-2. 단어 인지 (불규칙단어)",
-                "stop_rule": 3,
-                "questions": [
-                    {"q": "꽃", "a": "꼳", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "부엌", "a": "부억", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "국민", "a": "궁민", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "비눗물", "a": "비눈물", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "축하", "a": "추카", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "덥다", "a": "덥따", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "낱말", "a": "난말", "guide": "이 단어를 소리 내어 읽어보세요."},
-                    {"q": "많다", "a": "만타", "guide": "이 단어를 소리 내어 읽어보세요."}
+                    {"q": "꽃", "a": "꼳", "guide": "이 단어를 정확한 소리로 읽어보세요."},
+                    {"q": "국민", "a": "궁민", "guide": "이 단어를 정확한 소리로 읽어보세요."}
                 ]
             }
         }
     },
-    "fluency": {
-        "title": "III. 유창성",
+    "reading_fluency": {
+        "title": "III. 국어 - 읽기 유창성",
         "subtests": {
-            "dog_story": {
-                "name": "1. 글 읽기 유창성 (개 이야기)",
+            "reading_flow": {
+                "name": "1. 1분 글 읽기 유창성",
                 "stop_rule": 99,
                 "type": "text_flow",
                 "questions": [
                     {
-                        "q": "개는 사람이 집에서 기르는 동물 중에서 가장 오래된 동물입니다. 그래서 세계 어느 나라에서나 개를 기르는 모습을 볼 수 있습니다. 우리나라에서 옛날부터 기르던 개로는 진돗개, 삽살개, 풍산개가 있습니다. 이들은 각각 다른 특수성을 가지고 있습니다. 옛날 진도에서는 사냥꾼이 총 한 방 쏘지 않고 동물을 잡았습니다. 그 이유는 사냥할 때 진돗개를 데리고 가면 진돗개가 사슴이나 토끼를 다 잡아왔기 때문입니다...", 
+                        "q": "개는 사람이 집에서 기르는 동물 중에서 가장 오래된 동물입니다. 그래서 세계 어느 나라에서나 개를 기르는 모습을 볼 수 있습니다. 우리나라에서 옛날부터 기르던 개로는 진돗개, 삽살개, 풍산개가 있습니다...", 
                         "a": "분당 정확히 읽은 음절 수 채점", 
-                        "guide": "아동이 1분 동안 글을 소리 내어 읽도록 하세요. 교사는 실시간으로 오독 음절 수를 카운트합니다."
+                        "guide": "아동이 1분 동안 소리 내어 글을 읽도록 하고 오독 수/어절을 채점하세요."
                     }
                 ]
             }
         }
     },
     "vocab": {
-        "title": "IV. 어휘",
+        "title": "IV. 국어 - 어휘 및 이해",
         "subtests": {
-            "matching_pic": {
-                "name": "1. 단어가 뜻하는 그림 찾기",
+            "vocab_test": {
+                "name": "1. 어휘력 (반대말/유추/빈칸)",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "놀이터 🛝", "a": "1번 그림", "guide": "제시된 어휘 '놀이터'에 알맞은 그림(보기 1번)을 고르게 하세요."},
-                    {"q": "소방관 🧑‍🚒", "a": "4번 그림", "guide": "어휘 '소방관'에 알맞은 소방관 그림(보기 4번)을 아동이 터치하게 하세요."}
-                ]
-            },
-            "antonym": {
-                "name": "2. 반대말 대기",
-                "stop_rule": 3,
-                "questions": [
-                    {"q": "더하다", "a": "빼다", "guide": "'더하다'의 반대말은 무엇일까요? (5초 무응답 시 오답)"},
-                    {"q": "위", "a": "아래 / 밑", "guide": "'위'의 반대말은 무엇일까요?"},
-                    {"q": "쉽다", "a": "어렵다 / 난해하다", "guide": "'쉽다'의 반대말은 무엇일까요?"},
-                    {"q": "조용하다", "a": "시끄럽다 / 소란스럽다", "guide": "'조용하다'의 반대말은 무엇일까요?"}
-                ]
-            },
-            "analogy": {
-                "name": "3. 어휘 유추",
-                "stop_rule": 3,
-                "questions": [
+                    {"q": "더하다 <-> ( ? )", "a": "빼다", "guide": "'더하다'의 반대말은 무엇일까요?"},
                     {"q": "손 : 장갑 = 발 : ( ? )", "a": "양말 / 신발", "guide": "손에 장갑을 끼듯이 발에는 무엇을 신을까요?"},
-                    {"q": "낮 : 태양 = 밤 : ( ? )", "a": "달 / 별", "guide": "낮에는 태양이 뜨고 밤에는 무엇이 떠오를까요?"}
+                    {"q": "비가 오면 ( ? )을 씁니다.", "a": "우산", "guide": "문맥에 맞는 단어를 말해보세요."}
                 ]
             },
-            "blank_fill": {
-                "name": "4. 빈칸 채우기",
+            "comprehension": {
+                "name": "2. 지문 독해 및 이해",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "비가 오면 ( ? )을 씁니다.", "a": "우산", "guide": "문맥에 맞는 단어를 말해보세요."},
-                    {"q": "배가 고파서 ( ? )을 먹었습니다.", "a": "밥 / 음식 / 빵", "guide": "문맥에 맞는 단어를 말해보세요."}
+                    {"q": "손을 머리 위로 드세요.", "a": "동작 수행", "guide": "아동이 문장을 읽고 그에 맞는 동작을 수행하게 하세요."},
+                    {"q": "글의 중심 내용을 고르세요.", "a": "중심 내용 답안", "guide": "글을 읽고 핵심주제를 이야기해보세요."}
                 ]
             }
         }
     },
-    "comprehension": {
-        "title": "V. 읽기 이해",
+    "writing": {
+        "title": "V. 국어 - 쓰기 및 문법",
         "subtests": {
-            "sentence_under": {
-                "name": "1. 문장 이해",
+            "handwriting_spelling": {
+                "name": "1. 글씨쓰기 & 철자하기",
                 "stop_rule": 3,
                 "questions": [
-                    {"q": "손을 머리 위로 드세요.", "a": "동작 수행", "guide": "아동에게 문장을 조용히 읽고, 그 내용을 몸으로 표현하도록 하세요."},
-                    {"q": "뒤로 돌아서 손뼉을 세 번 치세요.", "a": "동작 수행", "guide": "문장을 조용히 읽고 내용을 몸으로 표현하게 하세요."}
+                    {"q": "학교 (받아쓰기)", "a": "학교", "guide": "선생님이 불러주는 단어를 바르게 써보세요: '학교'"},
+                    {"q": "부억 (맞춤법 고치기)", "a": "부엌", "guide": "틀린 맞춤법을 올바르게 고쳐 써보세요: '부억'"}
+                ]
+            },
+            "grammar_composition": {
+                "name": "2. 문법 및 표현 (짧은 글짓기)",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "주어-술어 호응 문장 완성", "a": "문장 구성", "guide": "'나는 내일 친구와 함께 ____.' 문장을 완성해 보세요."},
+                    {"q": "높임법 고쳐 쓰기", "a": "할머니께서 진지를 드신다.", "guide": "'할머니가 밥을 먹는다'를 높임말로 바꿔보세요."}
+                ]
+            }
+        }
+    },
+    "math_num": {
+        "title": "VI. 수학 - 수와 연산",
+        "subtests": {
+            "basic_ops": {
+                "name": "1. 수 개념 및 연산",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "5 + 3 = ?", "a": "8", "guide": "덧셈 문제를 풀어보세요."},
+                    {"q": "12 - 4 = ?", "a": "8", "guide": "뺄셈 문제를 풀어보세요."},
+                    {"q": "1/4 + 2/4 = ?", "a": "3/4", "guide": "분수의 덧셈을 풀어보세요."}
+                ]
+            }
+        }
+    },
+    "math_geo": {
+        "title": "VII. 수학 - 도형 및 측정",
+        "subtests": {
+            "geo_measure": {
+                "name": "1. 도형 및 측정",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "🔺 이 모양의 이름은?", "a": "삼각형", "guide": "그림을 보고 도형의 이름을 말해보세요."},
+                    {"q": "시계 읽기 (3시 30분)", "a": "3시 30분", "guide": "시계가 가리키는 시간을 읽어보세요."}
+                ]
+            }
+        }
+    },
+    "math_pattern": {
+        "title": "VIII. 수학 - 규칙성 및 자료·가능성",
+        "subtests": {
+            "pattern_data": {
+                "name": "1. 규칙성 및 자료 표현",
+                "stop_rule": 3,
+                "questions": [
+                    {"q": "2, 4, 6, ( ? ), 10", "a": "8", "guide": "빈칸에 들어갈 규칙적인 숫자를 말해보세요."},
+                    {"q": "막대그래프 해석 (가장 많은 항목)", "a": "그래프 답안", "guide": "그래프에서 가장 높은 막대가 의미하는 항목을 말해보세요."}
                 ]
             }
         }
     }
 }
 
-# 4대 대상군별 프리셋 매핑
+# 4대 대상군별 통합 스크리닝 프리셋 매핑
 PRESET_MAPPING = {
     "1": {
-        "name": "초1 (기초 해독 & 문해력 스크리닝)",
-        "desc": "초1 기초 음운, 글자·단어 인지, 글씨쓰기 및 기초 철자 진단 모드",
-        "domains": [("phoneme", "blending"), ("word", "letter"), ("word", "regular_word"), ("vocab", "matching_pic"), ("comprehension", "sentence_under")]
+        "name": "1. 초1 스크리닝 (기초 해독 & 수 개념)",
+        "desc": "음운 처리, 낱글자 인지, 글씨쓰기, 10 이하 연산 스크리닝",
+        "domains": [("phoneme", "ran_object"), ("phoneme", "blending"), ("word", "letter"), ("writing", "handwriting_spelling"), ("math_num", "basic_ops")]
     },
     "2": {
-        "name": "초3 발달지체 재심의 (결손 보완 분기 모드)",
-        "desc": "초3 재심의용 유창성, 어휘, 독해, 쓰기 평가 및 80% 미만 시 음운/해독 하향 보완 분기",
-        "domains": [("fluency", "dog_story"), ("vocab", "antonym"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
+        "name": "2. 초3 발달지체 재심의 (결손 보완 분기)",
+        "desc": "읽기 유창성, 어휘력, 쓰기 문법, 수 연산 및 도형 기초 스크리닝",
+        "domains": [("reading_fluency", "reading_flow"), ("vocab", "vocab_test"), ("writing", "grammar_composition"), ("math_num", "basic_ops"), ("math_geo", "geo_measure")]
     },
     "3": {
-        "name": "중입 (초6~중1 교과 문해력 진단)",
-        "desc": "중학교 입학 대비 어휘, 긴 글 독해, 문법 지식, 쓰기 유창성 평가 모드",
-        "domains": [("vocab", "antonym"), ("vocab", "analogy"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
+        "name": "3. 중입 (교과 문해력 & 수학)",
+        "desc": "지문 독해, 고급 어휘, 쓰기 표현, 분수 연산 및 규칙성 스크리닝",
+        "domains": [("vocab", "comprehension"), ("vocab", "vocab_test"), ("writing", "grammar_composition"), ("math_num", "basic_ops"), ("math_pattern", "pattern_data")]
     },
     "4": {
-        "name": "고입 (~중3 전환기 기능적 평가 모드)",
-        "desc": "고등학교 진학 대비 기능적 어휘, 고난도 추론 독해, 논리적 문장 구성력 평가 모드",
-        "domains": [("vocab", "analogy"), ("vocab", "blank_fill"), ("comprehension", "sentence_under")]
+        "name": "4. 고입 (~중3 전환기 기능적 평가)",
+        "desc": "기능적 문해력, 추론 독해, 논리적 글쓰기, 생활 수학 스크리닝",
+        "domains": [("vocab", "comprehension"), ("writing", "grammar_composition"), ("math_num", "basic_ops"), ("math_geo", "geo_measure"), ("math_pattern", "pattern_data")]
     }
 }
 
@@ -279,19 +270,27 @@ class RoomState:
             self.analyze_supplementary_recommendations()
 
     def analyze_supplementary_recommendations(self):
-        if self.student_grade == "초등학교 2학년":
-            for sub_key, scores in self.scores.items():
-                correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-                if correct_pct < 0.8:
-                    self.supplementary_recommended.append("음운 처리 보완검사")
-                    break
-        elif "초등학교 3학년" in self.student_grade or "초등학교 4학년" in self.student_grade:
-            for sub_key, scores in self.scores.items():
-                correct_pct = sum(scores) / len(scores) if len(scores) > 0 else 1.0
-                if correct_pct < 0.8:
-                    self.supplementary_recommended.append("음운 처리 보완검사")
-                    self.supplementary_recommended.append("글자·단어 인지 보완검사")
-                    break
+        korean_score_sum = 0
+        korean_count = 0
+        math_score_sum = 0
+        math_count = 0
+
+        for sub_key, scores in self.scores.items():
+            if len(scores) > 0:
+                pct = sum(scores) / len(scores)
+                if sub_key.startswith("math"):
+                    math_score_sum += pct
+                    math_count += 1
+                else:
+                    korean_score_sum += pct
+                    korean_count += 1
+
+        if korean_count > 0 and (korean_score_sum / korean_count) < 0.8:
+            self.supplementary_recommended.append("국어 음운/낱글자 보완 정밀검사")
+            self.supplementary_recommended.append("국어 기초 철자/쓰기 보완검사")
+
+        if math_count > 0 and (math_score_sum / math_count) < 0.8:
+            self.supplementary_recommended.append("수학 연산 유창성 하향 보완검사")
 
 # 글로벌 다중 검사방 저장소
 ROOMS: Dict[str, RoomState] = {}
@@ -300,22 +299,17 @@ def get_or_create_room(room_id: Optional[str] = None) -> RoomState:
     if room_id and room_id in ROOMS:
         return ROOMS[room_id]
     
-    # 4자리 랜덤 PIN 생성 (기존 PIN 중복 방지)
     for _ in range(100):
         new_pin = str(random.randint(1000, 9999))
         if new_pin not in ROOMS:
             ROOMS[new_pin] = RoomState(new_pin)
             return ROOMS[new_pin]
             
-    # fallback
     fallback_pin = str(time.time_ns())[-4:]
     ROOMS[fallback_pin] = RoomState(fallback_pin)
     return ROOMS[fallback_pin]
 
 # REST API Models & Endpoints
-class CreateRoomResponse(BaseModel):
-    room_id: str
-
 class StartRequest(BaseModel):
     room_id: str
     student_name: str
@@ -421,9 +415,11 @@ def api_supplementary(req: ActionRequest):
         for rec_name in room_obj.supplementary_recommended:
             if "음운" in rec_name:
                 supp_domains.append(("phoneme", "blending"))
-            if "글자" in rec_name:
                 supp_domains.append(("word", "letter"))
-                supp_domains.append(("word", "regular_word"))
+            if "철자" in rec_name:
+                supp_domains.append(("writing", "handwriting_spelling"))
+            if "수학" in rec_name:
+                supp_domains.append(("math_num", "basic_ops"))
         
         PRESET_MAPPING["supplementary"] = {
             "name": "보완 정밀 진단검사 모드",
@@ -459,7 +455,7 @@ TEACHER_HTML = """
 <html>
 <head>
     <meta charset="utf-8">
-    <title>교사용 스마트 채점 패널 (Multi-Room Teacher Panel)</title>
+    <title>교사용 기초학습능력 통합 스크리닝 패널 v8</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&display=swap" rel="stylesheet">
     <style>
@@ -470,7 +466,8 @@ TEACHER_HTML = """
         .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 25px; margin-bottom: 20px; }
         .form-group { margin-bottom: 15px; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
-        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; box-sizing: border-border-box; }
+        .form-group input, .form-group select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; box-sizing: border-box; }
+        .hint-text { font-size: 0.85rem; color: #2563eb; margin-top: 4px; font-weight: 500; }
         button { background-color: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background 0.2s; }
         button:hover { background-color: #1d4ed8; }
         .btn-correct { background-color: #10b981; font-size: 1.3rem; padding: 15px 35px; }
@@ -494,7 +491,7 @@ TEACHER_HTML = """
 </head>
 <body>
     <div class="header">
-        <div>🔍 국립특수교육원 기초학습기능검사 스마트 채점 패널</div>
+        <div>🔍 국립특수교육원 기초학습능력 25분 통합 스크리닝 (Reading, Writing, Math)</div>
         <div style="display:flex; align-items:center; gap:10px;">
             <span>🔑 내 방 번호(PIN):</span>
             <span id="pin-display" class="pin-badge">생성 중...</span>
@@ -519,27 +516,36 @@ TEACHER_HTML = """
                 <input type="text" id="input-name" placeholder="예: 김민수" value="김민수">
             </div>
             <div class="form-group">
-                <label>아동 학년 (만 나이)</label>
-                <select id="select-grade">
-                    <option value="유치원">유치원 (만 5세)</option>
-                    <option value="초등학교 1학년" selected>초등학교 1학년 (만 6세)</option>
-                    <option value="초등학교 2학년">초등학교 2학년 (만 7세)</option>
-                    <option value="초등학교 3학년">초등학교 3학년 (만 8세)</option>
-                    <option value="초등학교 4학년">초등학교 4학년 (만 9세)</option>
-                    <option value="중학교 1학년">중학교 1학년 (만 12세)</option>
-                    <option value="고등학교 1학년">고등학교 1학년 (만 15세)</option>
+                <label>아동 연령/학년 (만 나이)</label>
+                <select id="select-grade" onchange="autoSelectPreset()">
+                    <option value="유치원 / 영유아 (만 3세)">유치원 / 영유아 (만 3세)</option>
+                    <option value="유치원 / 영유아 (만 4세)">유치원 / 영유아 (만 4세)</option>
+                    <option value="유치원 / 영유아 (만 5세)">유치원 / 영유아 (만 5세)</option>
+                    <option value="초등학교 1학년 (만 6세)" selected>초등학교 1학년 (만 6세)</option>
+                    <option value="초등학교 2학년 (만 7세)">초등학교 2학년 (만 7세)</option>
+                    <option value="초등학교 3학년 (만 8세)">초등학교 3학년 (만 8세)</option>
+                    <option value="초등학교 4학년 (만 9세)">초등학교 4학년 (만 9세)</option>
+                    <option value="초등학교 5학년 (만 10세)">초등학교 5학년 (만 10세)</option>
+                    <option value="초등학교 6학년 (만 11세)">초등학교 6학년 (만 11세)</option>
+                    <option value="중학교 1학년 (만 12세)">중학교 1학년 (만 12세)</option>
+                    <option value="중학교 2학년 (만 13세)">중학교 2학년 (만 13세)</option>
+                    <option value="중학교 3학년 (만 14세)">중학교 3학년 (만 14세)</option>
+                    <option value="고등학교 1학년 (만 15세)">고등학교 1학년 (만 15세)</option>
+                    <option value="고등학교 2학년 (만 16세)">고등학교 2학년 (만 16세)</option>
+                    <option value="고등학교 3학년 (만 17세)">고등학교 3학년 (만 17세)</option>
                 </select>
+                <div class="hint-text" id="age-hint">💡 선택하신 연령에 맞는 스크리닝 모듈이 자동 지정되었습니다.</div>
             </div>
             <div class="form-group">
-                <label>대상별 진단 모듈 선택 (프리셋)</label>
+                <label>통합 스크리닝 진단 모듈 선택 (선생님 수동 변경 가능)</label>
                 <select id="select-preset">
-                    <option value="1" selected>1. 초1 (기초 해독 & 문해력 스크리닝 모드)</option>
-                    <option value="2">2. 초3 발달지체 재심의 (결손 보완 분기 모드)</option>
-                    <option value="3">3. 중입 (초6~중1 교과 문해력 진단 모드)</option>
-                    <option value="4">4. 고입 (~중3 전환기 기능적 평가 모드)</option>
+                    <option value="1" selected>1. 초1 스크리닝 (기초 해독 & 수 개념)</option>
+                    <option value="2">2. 초3 발달지체 재심의 (결손 보완 분기)</option>
+                    <option value="3">3. 중입 (교과 문해력 & 수학)</option>
+                    <option value="4">4. 고입 (~중3 전환기 기능적 평가)</option>
                 </select>
             </div>
-            <button onclick="startSession()" style="width:100%; font-size:1.2rem; padding:15px;">🚀 아동용 패널 연동 및 검사 시작</button>
+            <button onclick="startSession()" style="width:100%; font-size:1.2rem; padding:15px;">🚀 통합 스크리닝 연동 및 검사 시작</button>
         </div>
 
         <!-- 2. 실시간 검사 통제 카드 -->
@@ -593,13 +599,13 @@ TEACHER_HTML = """
 
         <!-- 4. 결과 및 IEP 보고서 카드 -->
         <div id="card-report" class="card" style="display:none; border-top:8px solid #10b981;">
-            <h1 style="color:#10b981; margin-top:0; text-align:center;">📊 진단평가 결과 및 IEP 권고 리포트</h1>
+            <h1 style="color:#10b981; margin-top:0; text-align:center;">📊 기초학습능력 통합 스크리닝 결과 & IEP 권고 리포트</h1>
             <div style="background-color:#f1f5f9; padding:15px; border-radius:8px; margin-bottom:20px;">
                 <h3 style="margin-top:0; color:#334155;">피평가자 인적사항</h3>
                 <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
                     <div>👤 <strong>이름:</strong> <span id="rep-name"></span></div>
-                    <div>🎒 <strong>학년:</strong> <span id="rep-grade"></span></div>
-                    <div>📑 <strong>프리셋:</strong> <span id="rep-preset"></span></div>
+                    <div>🎒 <strong>연령/학년:</strong> <span id="rep-grade"></span></div>
+                    <div>📑 <strong>진단모듈:</strong> <span id="rep-preset"></span></div>
                 </div>
             </div>
 
@@ -620,7 +626,7 @@ TEACHER_HTML = """
 
             <!-- 보완검사 자동 분기 결과 안내 -->
             <div id="supplementary-section" class="card" style="display:none; background-color:#fffbeb; border:1px solid #fef3c7; margin-top:20px;">
-                <h3 style="margin-top:0; color:#d97706;">⚠️ 보완 진단검사 실시 추천</h3>
+                <h3 style="margin-top:0; color:#d97706;">⚠️ 80% 미만 결손 발견: 정밀 보완검사 추천</h3>
                 <p id="supplementary-message" style="line-height:1.5;"></p>
                 <button onclick="startSupplementaryTest()" style="background-color:#d97706;">보완 검사 연동 실시하기</button>
             </div>
@@ -640,6 +646,26 @@ TEACHER_HTML = """
     <script>
         var currentRoomId = sessionStorage.getItem("teacher_room_id") || "";
 
+        function autoSelectPreset() {
+            var gradeVal = document.getElementById("select-grade").value;
+            var presetSelect = document.getElementById("select-preset");
+            var hintElem = document.getElementById("age-hint");
+
+            if (gradeVal.includes("만 3세") || gradeVal.includes("만 4세") || gradeVal.includes("만 5세") || gradeVal.includes("만 6세")) {
+                presetSelect.value = "1";
+                hintElem.innerText = "💡 만 3~6세 연령에 맞춰 '1. 초1 스크리닝 모드'가 자동 추천되었습니다.";
+            } else if (gradeVal.includes("만 7세") || gradeVal.includes("만 8세") || gradeVal.includes("만 9세") || gradeVal.includes("만 10세")) {
+                presetSelect.value = "2";
+                hintElem.innerText = "💡 만 7~10세 연령에 맞춰 '2. 초3 발달지체 재심의 모드'가 자동 추천되었습니다.";
+            } else if (gradeVal.includes("만 11세") || gradeVal.includes("만 12세") || gradeVal.includes("만 13세") || gradeVal.includes("만 14세")) {
+                presetSelect.value = "3";
+                hintElem.innerText = "💡 만 11~14세 연령에 맞춰 '3. 중입 교과 문해력 & 수학 모드'가 자동 추천되었습니다.";
+            } else {
+                presetSelect.value = "4";
+                hintElem.innerText = "💡 만 15~17세 연령에 맞춰 '4. 고입 전환기 기능적 평가 모드'가 자동 추천되었습니다.";
+            }
+        }
+
         function initRoom() {
             if (!currentRoomId) {
                 createNewRoom();
@@ -647,6 +673,7 @@ TEACHER_HTML = """
                 updatePinDisplay(currentRoomId);
                 pollState();
             }
+            autoSelectPreset();
         }
 
         function createNewRoom() {
@@ -835,7 +862,7 @@ TEACHER_HTML = """
                 var subCorrect = scoresList.reduce((a, b) => a + b, 0);
                 var subTotal = scoresList.length;
 
-                var maxQuestions = 8;
+                var maxQuestions = 5;
                 var displayName = subKey;
                 for (var dom in TEST_CONTENT) {
                     for (var sub in TEST_CONTENT[dom]["subtests"]) {
@@ -884,8 +911,8 @@ TEACHER_HTML = """
             if (state.supplementary_recommended.length > 0 && !state.supplementary_active) {
                 suppSection.style.display = "block";
                 document.getElementById("supplementary-message").innerHTML = `
-                    학생의 검사 결과 학습 결손(80% 미만)이 확인되었습니다.<br>
-                    <strong>특수교육 요강의 지능형 분기 지침</strong>에 따라 다음 보완 검사 추가 실시를 강력히 추천합니다:<br>
+                    학생의 통합 스크리닝 결과 학습 결손(80% 미만) 영역이 확인되었습니다.<br>
+                    <strong>특수교육 요강 지능형 분기 지침</strong>에 맞춰 추천되는 정밀 보완검사:<br>
                     🎁 <strong>추천 보완 검사:</strong> <span style='color:#d97706; font-weight:700;'>${state.supplementary_recommended.join(", ")}</span>
                 `;
             } else {
@@ -895,19 +922,18 @@ TEACHER_HTML = """
             var iepBox = document.getElementById("iep-guideline-box");
             if (lowScoreDetected) {
                 iepBox.innerHTML = `
-                    <p style="margin-top:0;"><strong>📌 종합 학습지수 진단: 특수교육적 지원 필요</strong></p>
+                    <p style="margin-top:0;"><strong>📌 종합 스크리닝 진단: 특수교육적 중재 및 맞춤형 지원 필요</strong></p>
                     <ul>
-                        <li><strong>학습환경:</strong> 학생의 기초 문해력 및 어휘력에서 유의미한 지치가 관찰됩니다. 교사 혹은 특수교사와의 일대일 개별화 수업 배치를 적극 고려해 주세요.</li>
-                        <li><strong>어휘 중재 전략:</strong> 아동용 시각 카드(이모지, 일러스트)를 동반한 연상 자극 훈련을 통해 실생활 단어와 쓰기 영역을 다감각(Multisensory) 접근으로 설계해 주십시오.</li>
-                        <li><strong>읽기 분석:</strong> 읽기 동작 표현 및 단어 해독 3초 타이밍 훈련(자동화 훈련)을 주 3회 15분 이상 매일 지속하는 것이 음운 결손 해소에 가장 효과적입니다.</li>
+                        <li><strong>국어(읽기/쓰기):</strong> 기초 음운 처리 및 글씨 가독성/철자하기에서 결손이 발견되었습니다. 다감각(Multisensory) 읽기-쓰기 연계 훈련을 매일 15분씩 지원해 주세요.</li>
+                        <li><strong>수학(수/연산/도형):</strong> 연산 자동화 및 수 개념 보완이 필요합니다. 실물 교구(수 모형) 및 구체물을 활용한 시각적 연산 중재를 추천합니다.</li>
                     </ul>
                 `;
             } else {
                 iepBox.innerHTML = `
-                    <p style="margin-top:0;"><strong>📌 종합 학습지수 진단: 정상 범위 내 발달</strong></p>
+                    <p style="margin-top:0;"><strong>📌 종합 스크리닝 진단: 정상 범주 발달</strong></p>
                     <ul>
-                        <li>현재 프리셋 진단평가 영역에서 아동의 수치적 발달 상태는 정상 발달 수준에 완전히 도달해 있습니다.</li>
-                        <li>기초 해독 및 읽기 유창성은 우수하므로, 이후 고급 교과 문해력 향상을 위해 긴 글 어휘력 및 추론 중심의 독해 학습을 지속적으로 권장해 드립니다.</li>
+                        <li>현재 선택된 통합 스크리닝 영역에서 아동의 발달 상태는 정상 범주에 도달해 있습니다.</li>
+                        <li>향후 교과 문해력 및 수학적 사고력 신장을 위해 응용 문제 풀이 위주의 지도를 권장합니다.</li>
                     </ul>
                 `;
             }
@@ -919,7 +945,7 @@ TEACHER_HTML = """
 </html>
 """
 
-# 아동용 UI HTML (PIN 입력 창 + 실시간 제시)
+# 아동용 UI HTML
 STUDENT_HTML = """
 <!DOCTYPE html>
 <html>
@@ -954,10 +980,6 @@ STUDENT_HTML = """
             line-height: 1.3;
             word-break: keep-all;
             transition: all 0.2s ease-in-out;
-        }
-        .giant-emoji {
-            font-size: 10rem;
-            margin-bottom: 20px;
         }
         .story-text {
             font-size: 2.2rem;
@@ -1031,13 +1053,13 @@ STUDENT_HTML = """
             <p id="pin-error-msg" style="color: #ef4444; font-size: 1.1rem; margin-top: 15px; display: none;"></p>
         </div>
 
-        <!-- 1. 대기 화면 또는 자동중지 완료시 화면 -->
+        <!-- 1. 대기 화면 -->
         <div id="student-waiting" class="waiting-screen" style="display:none;">
             <div class="giant-emoji pulse">📖</div>
             <div class="waiting-text" id="waiting-message">반갑습니다!<br>선생님과 함께 재미있는 공부를 시작해봐요.</div>
         </div>
 
-        <!-- 2. 글자 또는 삽화 자극 화면 -->
+        <!-- 2. 문제 자극 화면 -->
         <div id="student-exam" style="display:none;">
             <div id="question-area" class="giant-text"></div>
         </div>
@@ -1047,7 +1069,6 @@ STUDENT_HTML = """
     <script>
         var studentRoomId = "";
 
-        // URL 파라미터에서 room 추출 (?room=1234)
         function checkUrlRoom() {
             var urlParams = new URLSearchParams(window.location.search);
             var roomParam = urlParams.get('room');
@@ -1168,14 +1189,14 @@ async def get_student():
 async def redirect_root():
     return HTMLResponse(content="""
     <div style="font-family: sans-serif; text-align: center; margin-top: 60px; padding: 20px;">
-        <h2>🎒 국립특수교육원 기초학습기능검사 다중방 스마트 연동 시스템</h2>
-        <p style="color: #475569; font-size: 1.1rem;">여러 선생님께서 동시에 독립적으로 각자의 아동을 평가하실 수 있습니다.</p>
+        <h2>🎒 국립특수교육원 기초학습능력 통합 스크리닝 시스템 (Reading, Writing, Math)</h2>
+        <p style="color: #475569; font-size: 1.1rem;">국어 및 수학 3대 영역을 25분 안에 신속하게 평가하는 스마트 연동 시스템입니다.</p>
         
         <div style="margin: 30px auto; max-width: 600px; text-align: left; background: #f8fafc; padding: 30px; border-radius: 12px; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
             <h3 style="margin-top:0; color:#1e3a8a;">📱 접속 안내:</h3>
             <div style="margin-bottom: 20px;">
                 <p><strong>1. 교사 채점용 패널:</strong></p>
-                <a href="/teacher" style="display:inline-block; background:#2563eb; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">📱 교사용 화면 바로가기 (새 방 생성)</a>
+                <a href="/teacher" style="display:inline-block; background:#2563eb; color:white; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:bold;">📱 교사용 화면 바로가기 (PIN 생성)</a>
             </div>
             <hr style="border:0; border-top:1px solid #cbd5e1; margin:20px 0;">
             <div>
